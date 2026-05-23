@@ -1963,9 +1963,8 @@ function checkFileProtocol() {
 // ── Gemini helpers ──────────────────────────────────────────────────────────
 const GEMINI_KEY = "AIzaSyAZdrkGYQ5HKF8XZvmt7jZ2myA_ZNiA61M";
 function getGeminiUrl(model) {
-  const k = localStorage.getItem("gemini_key") || GEMINI_KEY;
   const m = model || "gemini-2.0-flash-lite";
-  return "https://generativelanguage.googleapis.com/v1beta/models/" + m + ":generateContent?key=" + k;
+  return "https://generativelanguage.googleapis.com/v1beta/models/" + m + ":generateContent?key=" + GEMINI_KEY;
 }
 const GEMINI_URL = getGeminiUrl();
 
@@ -2253,6 +2252,9 @@ async function fbSyncLocalRecs() {
 }
 
 function initFirebase() {
+  // Clear any stale API keys that might override built-in ones
+  if (localStorage.getItem('gemini_key')) localStorage.removeItem('gemini_key');
+  if (localStorage.getItem('openai_key')) localStorage.removeItem('openai_key');
   try {
     fbApp = firebase.initializeApp(FB_CONFIG);
     fbAuth = firebase.auth();
