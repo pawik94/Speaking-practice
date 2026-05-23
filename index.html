@@ -101,9 +101,6 @@ textarea.trb:focus{outline:none;border-color:var(--ac)}
 .vtab{flex:1;padding:9px 6px;background:transparent;border:none;color:var(--tx2);font-size:13px;cursor:pointer;transition:all .15s;font-family:inherit}
 .vtab.on{background:var(--ac);color:#fff;font-weight:600}
 </style>
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
 </head>
 <body>
 
@@ -2171,9 +2168,8 @@ function initFirebase() {
     });
   } catch(e) {
     console.error('Firebase init error:', e);
-    // If Firebase fails, hide overlay so app still works offline
     document.getElementById('login-overlay').style.display = 'none';
-    toast('Firebase niedostępny — tryb offline');
+    toast('Tryb offline');
   }
 }
 
@@ -2327,7 +2323,6 @@ document.addEventListener('DOMContentLoaded', () => {
       if (curTopic && fbUser) fbScheduleNoteSave(curTopic.q, notesEl.value);
     });
   }
-  // API key sync on change
   const keyInput = document.getElementById('ed-key');
   if (keyInput) {
     keyInput.addEventListener('change', () => {
@@ -2335,8 +2330,34 @@ document.addEventListener('DOMContentLoaded', () => {
       if (val && fbUser) fbSaveSettings({ openai_key: val });
     });
   }
-  initFirebase();
+  // Load Firebase SDK dynamically — safe in all contexts
+  loadFirebase();
 });
+
+function loadFirebase() {
+  // If already loaded (e.g. dev reload), init immediately
+  if (typeof firebase !== 'undefined') { initFirebase(); return; }
+
+  const load = (src, cb) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = cb;
+    s.onerror = () => {
+      console.warn('Firebase SDK failed to load — offline mode');
+      document.getElementById('login-overlay').style.display = 'none';
+      toast('Tryb offline — Firebase niedostępny');
+    };
+    document.head.appendChild(s);
+  };
+
+  const base = 'https://www.gstatic.com/firebasejs/10.12.0/';
+  load(base + 'firebase-app-compat.js', () => {
+    load(base + 'firebase-auth-compat.js', () => {
+      load(base + 'firebase-firestore-compat.js', () => {
+        initFirebase();
+      });
+    });
+  });
+}
 
 
 // =============== TOAST ===============
