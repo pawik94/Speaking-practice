@@ -1726,27 +1726,17 @@ async function runAIFeedback(transcript, topic, waveStats) {
     ? `Speaking pace: ${waveStats.wpm} wpm. Filler words: ${waveStats.fillerCount}. Pauses ≥0.5s: ${waveStats.pauses.length} (${waveStats.longPauses} long ≥2s).`
     : `Filler words: ${waveStats.fillerCount}. Pauses ≥0.5s: ${waveStats.pauses.length}.`;
 
-  const prompt = `You are a strict but constructive English speaking coach for a Polish adult learner at B2-C1 level. Analyse this speech transcript honestly and specifically.
+  const prompt = `You are a strict English speaking coach. Analyse this transcript in max 120 words total. Be blunt, not encouraging.
 
 ${topicLine}
-${statsLine}
 
-TRANSCRIPT:
-"${transcript}"
+TRANSCRIPT: "${transcript}"
 
-Your analysis MUST cover ALL of these — be concrete, not generic:
-
-1. TOPIC RELEVANCE — Did the speaker actually answer the question? Were the main arguments relevant and logical? If they rambled or went off-topic, say so clearly.
-
-2. VOCABULARY — List 2-3 specific words/phrases they used well (quote them). List 2-3 missed opportunities where they used a simple word when a more advanced one would fit (give the exact substitution).
-
-3. GRAMMAR — Identify up to 3 actual grammar errors from the transcript. Quote the wrong version, give the correct version, explain briefly.
-
-4. STRUCTURE — Did the response have a clear intro, body, conclusion? Was there logical flow? Be specific about what was missing.
-
-5. WHAT TO PRACTISE NEXT — One concrete, actionable recommendation based on the biggest weakness you saw.
-
-IMPORTANT: Do not give empty praise. If the response was poor quality, say so directly. Use a structured format with clear headers. Write in English. Be specific — always quote from the actual transcript.`;
+Reply with EXACTLY this structure (no extra text):
+TOPIC: [one sentence — did they answer the question? yes/partially/no + why]
+VOCAB: [best word they used] ✓ | should have said [simpler word they used] → [better word]
+GRAMMAR: [quote error] → [correction] (skip if none)
+VERDICT: [1 sentence — biggest weakness to fix]`;
 
   try {
     const text = await fetchGemini(prompt);
@@ -1995,15 +1985,116 @@ async function fetchOpenAI(body) {
   return { choices: [{ message: { content: text } }] };
 }
 
+
+// ════════════════════ SPACED REPETITION ════════════════════
+// Levels: 0=new/failed  1=hard(1d)  2=ok(4d)  3=good(10d)  4=mastered(30d)
+const SRS_INTERVALS = [0, 1, 4, 10, 30]; // days per level
+var srsData = {}; // {word: {level, nextReview, seen}}
+
+function srsKey() { return 'srs_' + vocCategory; }
+
+function srsLoad() {
+  try {
+    var raw = localStorage.getItem(srsKey());
+    srsData = raw ? JSON.parse(raw) : {};
+  } catch(e) { srsData = {}; }
+}
+
+function srsSave() {
+  try { localStorage.setItem(srsKey(), JSON.stringify(srsData)); } catch(e) {}
+  // Sync to Firestore
+  if (fbUser) {
+    const ud = fbUserDoc();
+    if (ud) ud.collection('srs').doc(vocCategory).set({data: srsData, updatedAt: Date.now()}).catch(()=>{});
+  }
+}
+
+async function srsFirestoreLoad() {
+  if (!fbUser) return;
+  try {
+    const ud = fbUserDoc();
+    const snap = await ud.collection('srs').doc(vocCategory).get();
+    if (snap.exists && snap.data().data) {
+      // Merge: Firestore wins for newer entries
+      const remote = snap.data().data;
+      Object.keys(remote).forEach(k => {
+        if (!srsData[k] || (remote[k].seen || 0) > (srsData[k].seen || 0)) {
+          srsData[k] = remote[k];
+        }
+      });
+      localStorage.setItem(srsKey(), JSON.stringify(srsData));
+    }
+  } catch(e) {}
+}
+
+function srsMark(word, knew) {
+  var entry = srsData[word] || {level: 0, nextReview: 0, seen: 0};
+  entry.seen = (entry.seen || 0) + 1;
+  if (knew) {
+    entry.level = Math.min(4, (entry.level || 0) + 1);
+  } else {
+    entry.level = 0;
+  }
+  var days = SRS_INTERVALS[entry.level];
+  entry.nextReview = Date.now() + days * 86400000;
+  srsData[word] = entry;
+  srsSave();
+  // Re-render just this card
+  renderVocCards(true);
+}
+
+function srsGetDue(pool) {
+  var now = Date.now();
+  var due = [], notSeen = [], later = [];
+  pool.forEach(function(pair) {
+    var e = srsData[pair[0]];
+    if (!e) notSeen.push(pair);
+    else if (e.nextReview <= now) due.push(pair);
+    else later.push(pair);
+  });
+  // Priority: due reviews first, then new words, then future words
+  return due.concat(notSeen).concat(later);
+}
+
+function srsLevelLabel(word) {
+  var e = srsData[word];
+  if (!e) return {dots: '○○○○', label: 'New', color: 'var(--tx3)'};
+  var dots = ['●','●','●','●'].map(function(d,i){
+    return i < e.level
+      ? '<span style="color:var(--ac)">●</span>'
+      : '<span style="opacity:.25">○</span>';
+  }).join('');
+  var labels = ['Failed','Hard','OK','Good','Mastered'];
+  var colors = ['var(--rd)','var(--am)','#60a5fa','#34d399','var(--gr)'];
+  return {dots: dots, label: labels[e.level] || 'New', color: colors[e.level] || 'var(--tx3)'};
+}
+
+function srsStatsLine(pool) {
+  srsLoad();
+  var now = Date.now();
+  var total = pool.length, seen = 0, due = 0, mastered = 0;
+  pool.forEach(function(pair) {
+    var e = srsData[pair[0]];
+    if (!e) return;
+    seen++;
+    if (e.nextReview <= now) due++;
+    if (e.level === 4) mastered++;
+  });
+  return due + ' do powtórki · ' + mastered + '/' + total + ' opanowanych';
+}
+// ════════════════════ END SPACED REPETITION ════════════════════
+
 function showVocabLesson() {
-  var seed1 = Date.now();
-  var seed2 = seed1 ^ 0xDEAD;
+  srsLoad();
   var pool = vocCategory === 'idioms' ? ALL_IDIOMS : vocCategory === 'adjectives' ? ALL_ADJECTIVES : ALL_WORDS;
-  // pair[2] is built-in example sentence (Words only); exs starts with it so cards render instantly
-  vocItems = seededShuffle(pool.slice(), seed1).slice(0, 6).map(function(pair) {
+  // SRS: prioritise due reviews, then new words
+  var ordered = srsGetDue(pool).slice(0, 6);
+  vocItems = ordered.map(function(pair) {
     var builtIn = pair[2] ? [pair[2]] : [];
     return {e: pair[0], p: pair[1], builtIn: builtIn, exs: null};
   });
+  // Load SRS from Firestore in background
+  if (fbUser) srsFirestoreLoad();
   vocBuf = null; vocTranscript = '';
   var vt = document.getElementById('voc-text'); if (vt) vt.value = '';
   var fb = document.getElementById('voc-feedback'); if (fb) fb.innerHTML = '';
@@ -2018,14 +2109,22 @@ function showVocabLesson() {
 
 function renderVocCards(loaded) {
   var wrap = document.getElementById('voc-cards'); if (!wrap) return;
+  var pool2 = vocCategory === 'idioms' ? ALL_IDIOMS : vocCategory === 'adjectives' ? ALL_ADJECTIVES : ALL_WORDS;
   var catLabel = vocCategory === 'idioms' ? 'Idiomy & Phrasal Verbs' : vocCategory === 'adjectives' ? 'Cechy charakteru (Adjectives)' : 'Vocabulary (Words)';
-  var html = '<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--tx3);margin-bottom:8px">' + catLabel + '</div>';
+  var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'    + '<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--tx3)">' + catLabel + '</div>'    + '<div style="font-size:11px;color:var(--tx3)">' + srsStatsLine(pool2) + '</div>'    + '</div>';
   vocItems.forEach(function(item) {
     html += '<div style="background:var(--bg3);border-radius:10px;padding:12px 14px;margin-bottom:8px">';
-    // Header row: word + translation
-    html += '<div style="display:flex;gap:10px;align-items:baseline;margin-bottom:8px">'
+    // Header row: word + translation + SRS level
+    var srsInfo = srsLevelLabel(item.e);
+    html += '<div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;justify-content:space-between">'
+      + '<div style="display:flex;gap:8px;align-items:baseline">'
       + '<span style="font-size:15px;font-weight:700;color:#dde0ff">' + esc(item.e) + '</span>'
       + '<span style="font-size:12px;color:var(--tx2)">' + esc(item.p) + '</span>'
+      + '</div>'
+      + '<div style="display:flex;align-items:center;gap:5px;flex-shrink:0">'
+      + '<span style="font-size:11px;letter-spacing:1px">' + srsInfo.dots + '</span>'
+      + '<span style="font-size:10px;color:' + srsInfo.color + '">' + srsInfo.label + '</span>'
+      + '</div>'
       + '</div>';
     // Built-in example (always shown immediately, no API needed)
     var builtIn = item.builtIn || [];
@@ -2050,6 +2149,8 @@ function renderVocCards(loaded) {
       // Has built-in, still waiting for AI
       html += '<div style="font-size:11px;color:var(--tx3);font-style:italic;margin-top:4px">&#x23F3; Loading AI examples...</div>';
     }
+    // SRS buttons
+    html += '<div style="display:flex;gap:6px;margin-top:10px">'      + '<button class="b0 sm" style="flex:1;background:rgba(255,85,85,.12);color:var(--rd);border:1px solid rgba(255,85,85,.2)" onclick="srsMark(\''+item.e+'\',false)">✕ Nie znałem</button>'      + '<button class="bp sm" style="flex:1" onclick="srsMark(\''+item.e+'\',true)">✓ Znałem</button>'      + '</div>';
     html += '</div>';
   });
   wrap.innerHTML = html;
