@@ -1881,7 +1881,7 @@ function checkFileProtocol() {
 
 // ── Gemini helpers ──────────────────────────────────────────────────────────
 const GEMINI_KEY = "AIzaSyAZdrkGYQ5HKF8XZvmt7jZ2myA_ZNiA61M";
-function getGeminiUrl() { const k = localStorage.getItem("gemini_key") || GEMINI_KEY; return "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + k; }
+function getGeminiUrl() { const k = localStorage.getItem("gemini_key") || GEMINI_KEY; return "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + k; }
 const GEMINI_URL = getGeminiUrl();
 
 async function fetchGemini(prompt) {
