@@ -2027,8 +2027,11 @@ async function srsFirestoreLoad() {
   } catch(e) {}
 }
 
-function srsMark(word, knew) {
+function srsMark(word, knew, btnRowId) {
   var entry = srsData[word] || {level: 0, nextReview: 0, seen: 0};
+  // Prevent double-marking in same session
+  if (entry._markedThisSession) return;
+  entry._markedThisSession = true;
   entry.seen = (entry.seen || 0) + 1;
   if (knew) {
     entry.level = Math.min(4, (entry.level || 0) + 1);
@@ -2039,8 +2042,19 @@ function srsMark(word, knew) {
   entry.nextReview = Date.now() + days * 86400000;
   srsData[word] = entry;
   srsSave();
-  // Re-render just this card
-  renderVocCards(true);
+  // Replace button row in-place (no full re-render)
+  if (btnRowId) {
+    var el = document.getElementById(btnRowId);
+    if (el) {
+      var si = srsLevelLabel(word);
+      el.style.transition = 'opacity .3s';
+      el.style.opacity = '0';
+      setTimeout(function() {
+        el.innerHTML = '<span style="font-size:12px;color:' + si.color + '">✓ ' + si.label + ' — powtórka za ' + days + (days===1?' dzień':days<5?' dni':' dni') + '</span>';
+        el.style.opacity = '0.5';
+      }, 200);
+    }
+  }
 }
 
 function srsGetDue(pool) {
@@ -2150,7 +2164,17 @@ function renderVocCards(loaded) {
       html += '<div style="font-size:11px;color:var(--tx3);font-style:italic;margin-top:4px">&#x23F3; Loading AI examples...</div>';
     }
     // SRS buttons
-    html += '<div style="display:flex;gap:6px;margin-top:10px">'      + '<button class="b0 sm" style="flex:1;background:rgba(255,85,85,.12);color:var(--rd);border:1px solid rgba(255,85,85,.2)" onclick="srsMark(\''+item.e+'\',false)">✕ Nie znałem</button>'      + '<button class="bp sm" style="flex:1" onclick="srsMark(\''+item.e+'\',true)">✓ Znałem</button>'      + '</div>';
+    var wid = 'srs-'+item.e.replace(/[^a-z0-9]/gi,'_');
+    var alreadyMarked = srsData[item.e] && srsData[item.e].seen > 0;
+    if (alreadyMarked) {
+      var si = srsLevelLabel(item.e);
+      html += '<div id="'+wid+'" style="display:flex;gap:6px;margin-top:10px;opacity:.4;font-size:12px;color:var(--tx3);padding:4px 0">✓ Oceniono: <span style="color:'+si.color+'">'+si.label+'</span></div>';
+    } else {
+      html += '<div id="'+wid+'" style="display:flex;gap:6px;margin-top:10px">'
+        + '<button class="b0 sm" style="flex:1;background:rgba(255,85,85,.12);color:var(--rd);border:1px solid rgba(255,85,85,.2)" onclick="srsMark(\''+item.e+'\',false,\''+wid+'\')">✕ Nie znałem</button>'
+        + '<button class="bp sm" style="flex:1" onclick="srsMark(\''+item.e+'\',true,\''+wid+'\')">✓ Znałem</button>'
+        + '</div>';
+    }
     html += '</div>';
   });
   wrap.innerHTML = html;
