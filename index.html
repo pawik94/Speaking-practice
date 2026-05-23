@@ -1628,7 +1628,7 @@ async function transcribeAudio() {
     setTrBar(50);
     setTrStatus('Sending to Gemini…', true);
 
-    const res = await fetch(getGeminiUrl('gemini-1.5-pro'), {
+    const res = await fetch(getGeminiUrl('gemini-1.5-flash'), {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -2145,6 +2145,32 @@ function hideLoginOverlay(user) {
   if (bar) bar.style.display = 'flex';
   if (nameEl) nameEl.textContent = user.displayName || user.email;
   if (photoEl && user.photoURL) { photoEl.src = user.photoURL; photoEl.style.display = ''; }
+  // Sync all local recordings to Firestore on login
+  setTimeout(fbSyncLocalRecs, 1500);
+}
+
+async function fbSyncLocalRecs() {
+  if (!fbUser) return;
+  try {
+    const local = await dbGetAll();
+    if (!local || !local.length) return;
+    // Get existing Firestore IDs to avoid duplicates
+    const snap = await fbUserDoc().collection('recordings').get();
+    const fbIds = new Set(snap.docs.map(d => d.id));
+    let synced = 0;
+    for (const rec of local) {
+      if (!fbIds.has(String(rec.id))) {
+        await fbSaveRec(rec);
+        synced++;
+      }
+    }
+    if (synced > 0) {
+      console.log('Synced', synced, 'local recordings to Firestore');
+      toast('Zsynchronizowano ' + synced + ' nagrań z chmurą');
+    }
+  } catch(e) {
+    console.warn('fbSyncLocalRecs error:', e);
+  }
 }
 
 function initFirebase() {
@@ -2255,10 +2281,11 @@ const _origDbSave = dbSave;
 dbSave = async function(rec) {
   await _origDbSave(rec);
   if (fbUser) {
-    fbSaveRec(rec).then(() => console.log('Saved to Firestore:', rec.id)).catch(e => console.warn('Firestore save failed:', e));
-  } else {
-    console.warn('dbSave: fbUser not set, skipping Firestore sync');
+    fbSaveRec(rec)
+      .then(() => console.log('Saved to Firestore:', rec.id))
+      .catch(e => console.warn('Firestore save failed:', e));
   }
+  // If not logged in yet, fbSyncLocalRecs will pick it up on next login
 };
 
 const _origDbDel = dbDel;
