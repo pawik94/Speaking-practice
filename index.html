@@ -1613,48 +1613,36 @@ async function transcribeAudio() {
   setTrStatus('Preparing audio…', true); setTrBar(20);
 
   try {
-    // Use original WebM blob (much smaller than WAV — Gemini 20MB limit)
-    let base64Audio, mimeType;
+    // Build FormData with WebM (original recording, small) or WAV fallback
+    const form = new FormData();
     if (edRec && edRec.audioAB) {
-      const bytes = new Uint8Array(edRec.audioAB);
-      let binary = '';
-      const chunk = 8192;
-      for (let i = 0; i < bytes.length; i += chunk)
-        binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-      base64Audio = btoa(binary);
-      mimeType = 'audio/webm';
+      const blob = new Blob([edRec.audioAB], {type: 'audio/webm'});
+      form.append('file', new File([blob], 'rec.webm', {type: 'audio/webm'}));
     } else {
-      // Fallback: WAV from curBuf
       const wavAB = await bufToAB(curBuf);
-      const bytes = new Uint8Array(wavAB);
-      let binary = '';
-      const chunk = 8192;
-      for (let i = 0; i < bytes.length; i += chunk)
-        binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-      base64Audio = btoa(binary);
-      mimeType = 'audio/wav';
+      const blob = new Blob([wavAB], {type: 'audio/wav'});
+      form.append('file', new File([blob], 'rec.wav', {type: 'audio/wav'}));
     }
+    form.append('model', 'whisper-large-v3');
+    form.append('language', 'en');
+    form.append('response_format', 'text');
 
-    setTrBar(50); setTrStatus('Sending to Gemini…', true);
+    setTrBar(50); setTrStatus('Sending to Groq Whisper…', true);
 
-    const res = await fetch(getGeminiUrl('gemini-2.0-flash'), {
+    const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        contents: [{parts: [
-          {inline_data: {mime_type: mimeType, data: base64Audio}},
-          {text: 'Transcribe this English speech recording accurately. Return only the spoken words, nothing else.'}
-        ]}]
-      })
+      headers: {'Authorization': 'Bearer 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'},
+      body: form
     });
+
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error((err.error && err.error.message) || 'HTTP ' + res.status);
     }
+
     setTrBar(90);
-    const data = await res.json();
-    const transcript = (data.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
-    if (!transcript) throw new Error('Gemini zwrócił pustą transkrypcję');
+    const transcript = (await res.text()).trim();
+    if (!transcript) throw new Error('Pusta transkrypcja');
 
     const out = document.getElementById('tr-out');
     if (out) out.value = transcript;
@@ -1668,11 +1656,7 @@ async function transcribeAudio() {
   } catch(e) {
     console.error('Transcription error:', e);
     let msg = e.message || String(e);
-    if (msg.includes('quota') || msg.includes('RESOURCE_EXHAUSTED')) {
-      msg = 'Limit API — poczekaj 60s i spróbuj ponownie';
-    } else if (msg.includes('not found') || msg.includes('not supported')) {
-      msg = 'Model Gemini niedostępny — skontaktuj się z pomocą';
-    }
+    if (msg.includes('quota') || msg.includes('rate_limit')) msg = 'Limit Groq — poczekaj chwilę i spróbuj ponownie';
     setTrStatus('Błąd: ' + msg, false);
     toast('Błąd: ' + msg);
   }
