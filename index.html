@@ -404,7 +404,7 @@ textarea.trb:focus{outline:none;border-color:var(--ac)}
           <span style="color:var(--tx3)">Transkrypt z nagrania jest już wstępnie wypełniony poniżej (live recognition).</span>
         </div>
         <div id="tr-key-row" style="display:flex;gap:7px;margin-bottom:9px;flex-wrap:wrap;align-items:center">
-          <input id="tr-apikey" type="password" placeholder="sk-... (OpenAI API key)"
+          <input id="tr-apikey" type="password" placeholder="Gemini API key (opcjonalnie — domyślny jest wbudowany)"
             style="flex:1;min-width:140px;background:var(--bg);border:1px solid var(--b2);border-radius:8px;color:var(--tx);font-size:12px;padding:5px 9px;font-family:inherit"
             oninput="trKeyChanged()">
           <button class="b0 sm" onclick="trSaveKey()">Save key</button>
@@ -1590,96 +1590,75 @@ document.addEventListener('focusout',e=>{if(e.target?.id==='tr-out')saveTr();});
 // ═══════════════════════ WHISPER TRANSCRIPTION ═══════════════════════
 // ═══════════════════════ TRANSCRIPT KEY MANAGEMENT ═══════════════════════
 function trInitKey() {
-  const k = localStorage.getItem('openai_key') || '';
-  const inp = document.getElementById('tr-apikey');
   const st = document.getElementById('tr-key-status');
-  if (inp) inp.value = k ? '••••••••' : '';
-  if (st) st.textContent = k ? '✓ Key saved' : 'No key saved';
+  if (st) st.textContent = '✓ Gemini AI gotowy';
 }
-function trKeyChanged() {
-  const st = document.getElementById('tr-key-status');
-  if (st) st.textContent = '';
-}
+function trKeyChanged() {}
 function trSaveKey() {
   const inp = document.getElementById('tr-apikey');
   const val = inp?.value?.trim();
-  if (!val || val === '••••••••') { toast('Enter your OpenAI API key'); return; }
-  localStorage.setItem('openai_key', val);
-  inp.value = '••••••••';
-  const st = document.getElementById('tr-key-status');
-  if (st) st.textContent = '✓ Key saved';
-  toast('API key saved');
+  if (val && val !== '••••••••') {
+    localStorage.setItem('gemini_key', val);
+    inp.value = '••••••••';
+    const st = document.getElementById('tr-key-status');
+    if (st) st.textContent = '✓ Klucz zapisany';
+    toast('Klucz Gemini zapisany');
+  }
 }
 
 async function transcribeAudio() {
   if (!curBuf) { toast('No recording loaded'); return; }
-  if (checkFileProtocol()) return;
-  const apiKey = localStorage.getItem('openai_key');
-  if (!apiKey) {
-    toast('Enter and save your OpenAI API key first');
-    document.getElementById('tr-apikey')?.focus();
-    return;
-  }
   const btn = document.getElementById('btn-tr');
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Transcribing…'; }
-  setTrStatus('Sending to OpenAI Whisper…', true); setTrBar(20);
+  setTrStatus('Preparing audio…', true); setTrBar(15);
 
   try {
-    // Always use curBuf -> WAV for consistency.
-    // edRec.audioAB may be original WebM OR re-encoded WAV (after cuts) –
-    // sending it as 'audio/webm' when it's actually WAV caused "Failed to fetch" / Whisper errors.
-    if (!curBuf) throw new Error('No audio data – open a recording first');
-    setTrStatus('Preparing audio…', true); setTrBar(15);
+    // Convert AudioBuffer → WAV → base64 for Gemini
     const wavAB = await bufToAB(curBuf);
-    const blob = new Blob([wavAB], { type: 'audio/wav' });
-    const file = new File([blob], 'recording.wav', { type: 'audio/wav' });
-    const form = new FormData();
-    form.append('file', file);
-    form.append('model', 'whisper-1');
-    form.append('language', 'en');
-    form.append('response_format', 'verbose_json');
-    form.append('timestamp_granularities[]', 'segment');
+    setTrBar(30);
 
+    // Convert ArrayBuffer to base64
+    const bytes = new Uint8Array(wavAB);
+    let binary = '';
+    const chunk = 8192;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    }
+    const base64Audio = btoa(binary);
     setTrBar(50);
-    const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    setTrStatus('Sending to Gemini…', true);
+
+    const res = await fetch(GEMINI_URL, {
       method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + apiKey },
-      body: form
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        contents: [{parts: [
+          {inline_data: {mime_type: 'audio/wav', data: base64Audio}},
+          {text: 'Transcribe this English audio recording accurately. Return only the transcription text, nothing else — no labels, no explanations.'}
+        ]}]
+      })
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err?.error?.message || 'HTTP ' + res.status);
+      throw new Error((err.error && err.error.message) || 'HTTP ' + res.status);
     }
     setTrBar(90);
     const data = await res.json();
-
-    // Build transcript with pause markers from segment timestamps
-    let transcript = '';
-    if (data.segments?.length) {
-      let prevEnd = 0;
-      data.segments.forEach(seg => {
-        const gap = seg.start - prevEnd;
-        if (gap > 1.2 && prevEnd > 0) transcript += ` [pause ${gap.toFixed(1)}s]`;
-        transcript += seg.text;
-        prevEnd = seg.end;
-      });
-    } else {
-      transcript = data.text || '';
-    }
-    transcript = transcript.trim();
+    const transcript = (data.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
 
     const out = document.getElementById('tr-out');
     if (out) out.value = transcript;
-    if (db && edId) dbPatch(edId, { transcript });
+    if (db && edId) dbPatch(edId, {transcript});
+    if (fbUser) { const {audioAB, ...meta} = edRec || {}; fbSaveRec({...meta, id: edId, transcript}); }
 
-    setTrBar(100); setTrStatus('✓ Transcription complete', false);
+    setTrBar(100); setTrStatus('✓ Transkrypcja gotowa', false);
     setTimeout(() => setTrStatus(''), 4000);
-    toast('Transcription complete');
+    toast('Transkrypcja gotowa');
 
   } catch(e) {
     console.error('Transcription error:', e);
-    setTrStatus('Failed: ' + e.message, false);
-    toast('Transcription failed: ' + e.message);
+    setTrStatus('Błąd: ' + e.message, false);
+    toast('Transkrypcja nie powiodła się: ' + e.message);
   }
   if (btn) { btn.disabled = false; btn.textContent = '▶ Transcribe audio'; }
 }
@@ -1893,27 +1872,37 @@ var vocAnalyserNode = null, vocRecAC = null, vocSpeechRec = null, vocTranscript 
 
 function checkFileProtocol() {
   if (window.location.protocol === 'file:') {
-    var msg = 'Blad polaczenia z OpenAI API.\n\nPrzegladarki blokuja polaczenia z zewnetrznymi API gdy plik jest otwierany bezposrednio (file://).\n\nRozwiazanie — uruchom lokalny serwer:\n1. Otworz terminal w folderze z plikiem\n2. Wpisz: python3 -m http.server 8080\n3. Otworz: http://localhost:8080/' + (window.location.pathname.split('/').pop() || 'plik.html');
+    var msg = 'Błąd połączenia z Gemini API.\n\nPrzegladarki blokuja polaczenia z zewnetrznymi API gdy plik jest otwierany bezposrednio (file://).\n\nRozwiazanie — uruchom lokalny serwer:\n1. Otworz terminal w folderze z plikiem\n2. Wpisz: python3 -m http.server 8080\n3. Otworz: http://localhost:8080/' + (window.location.pathname.split('/').pop() || 'plik.html');
     alert(msg);
     return true;
   }
   return false;
 }
 
-async function fetchOpenAI(body) {
-  var apiKey = localStorage.getItem('openai_key');
-  if (!apiKey) throw new Error('Brak klucza API — wpisz go w edytorze nagran');
-  if (checkFileProtocol()) throw new Error('file:// — uruchom przez lokalny serwer (patrz instrukcja)');
-  var res = await fetch('https://api.openai.com/v1/chat/completions', {
+// ── Gemini helpers ──────────────────────────────────────────────────────────
+const GEMINI_KEY = "AIzaSyAZdrkGYQ5HKF8XZvmt7jZ2myA_ZNiA61M";
+function getGeminiUrl() { const k = localStorage.getItem("gemini_key") || GEMINI_KEY; return "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + k; }
+const GEMINI_URL = getGeminiUrl();
+
+async function fetchGemini(prompt) {
+  const res = await fetch(GEMINI_URL, {
     method: 'POST',
-    headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + apiKey},
-    body: JSON.stringify(body)
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({contents: [{parts: [{text: prompt}]}]})
   });
   if (!res.ok) {
-    var e2 = await res.json().catch(function() { return {}; });
+    const e2 = await res.json().catch(() => ({}));
     throw new Error((e2.error && e2.error.message) || 'HTTP ' + res.status);
   }
-  return res.json();
+  const data = await res.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+}
+
+// Backwards compat wrapper (used by vocab functions that expect .choices[0].message.content)
+async function fetchOpenAI(body) {
+  const prompt = body.messages?.map(m => m.role === 'user' ? m.content : '').filter(Boolean).join('\n') || '';
+  const text = await fetchGemini(prompt);
+  return { choices: [{ message: { content: text } }] };
 }
 
 function showVocabLesson() {
@@ -1979,7 +1968,7 @@ function renderVocCards(loaded) {
 async function loadVocExamples() {
   // Always render built-in examples immediately (no spinner for words)
   renderVocCards(false);
-  if (!localStorage.getItem('openai_key') || window.location.protocol === 'file:') {
+  if (window.location.protocol === 'file:') {
     vocItems.forEach(function(w) { w.exs = []; });
     renderVocCards(true); return;
   }
@@ -2223,10 +2212,10 @@ async function fbLoadSettings() {
   const ud = fbUserDoc(); if (!ud) return;
   try {
     const snap = await ud.collection('settings').doc('main').get();
-    if (snap.exists && snap.data().openai_key) {
-      localStorage.setItem('openai_key', snap.data().openai_key);
+    if (snap.exists && snap.data().gemini_key) {
+      localStorage.setItem('openai_key', snap.data().gemini_key);
       const el = document.getElementById('ed-key');
-      if (el) el.value = snap.data().openai_key;
+      if (el) el.value = snap.data().gemini_key;
     }
   } catch(e) {}
 }
@@ -2327,7 +2316,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (keyInput) {
     keyInput.addEventListener('change', () => {
       const val = keyInput.value.trim();
-      if (val && fbUser) fbSaveSettings({ openai_key: val });
+      if (val && fbUser) fbSaveSettings({ gemini_key: val });
     });
   }
   // Load Firebase SDK dynamically — safe in all contexts
