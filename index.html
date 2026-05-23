@@ -967,7 +967,7 @@ function go(id) {
   window.scrollTo(0, 0);
 }
 
-function showHist() { renderHist(); go('hist'); }
+function showHist() { go('hist'); renderHist(); }
 
 // ═══════════════════════ TOPIC ═══════════════════════
 function gen() {
@@ -1607,34 +1607,43 @@ function trSaveKey() {
 }
 
 async function transcribeAudio() {
-  if (!curBuf) { toast('No recording loaded'); return; }
+  if (!edRec && !curBuf) { toast('Brak nagrania'); return; }
   const btn = document.getElementById('btn-tr');
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Transcribing…'; }
-  setTrStatus('Preparing audio…', true); setTrBar(15);
+  setTrStatus('Preparing audio…', true); setTrBar(20);
 
   try {
-    // Convert AudioBuffer → WAV → base64 for Gemini
-    const wavAB = await bufToAB(curBuf);
-    setTrBar(30);
-
-    // Convert ArrayBuffer to base64
-    const bytes = new Uint8Array(wavAB);
-    let binary = '';
-    const chunk = 8192;
-    for (let i = 0; i < bytes.length; i += chunk) {
-      binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    // Use original WebM blob (much smaller than WAV — Gemini 20MB limit)
+    let base64Audio, mimeType;
+    if (edRec && edRec.audioAB) {
+      const bytes = new Uint8Array(edRec.audioAB);
+      let binary = '';
+      const chunk = 8192;
+      for (let i = 0; i < bytes.length; i += chunk)
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+      base64Audio = btoa(binary);
+      mimeType = 'audio/webm';
+    } else {
+      // Fallback: WAV from curBuf
+      const wavAB = await bufToAB(curBuf);
+      const bytes = new Uint8Array(wavAB);
+      let binary = '';
+      const chunk = 8192;
+      for (let i = 0; i < bytes.length; i += chunk)
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+      base64Audio = btoa(binary);
+      mimeType = 'audio/wav';
     }
-    const base64Audio = btoa(binary);
-    setTrBar(50);
-    setTrStatus('Sending to Gemini…', true);
 
-    const res = await fetch(getGeminiUrl('gemini-1.5-flash'), {
+    setTrBar(50); setTrStatus('Sending to Gemini…', true);
+
+    const res = await fetch(getGeminiUrl('gemini-2.0-flash'), {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         contents: [{parts: [
-          {inline_data: {mime_type: 'audio/wav', data: base64Audio}},
-          {text: 'Transcribe this English audio recording accurately. Return only the transcription text, nothing else — no labels, no explanations.'}
+          {inline_data: {mime_type: mimeType, data: base64Audio}},
+          {text: 'Transcribe this English speech recording accurately. Return only the spoken words, nothing else.'}
         ]}]
       })
     });
@@ -1645,11 +1654,12 @@ async function transcribeAudio() {
     setTrBar(90);
     const data = await res.json();
     const transcript = (data.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
+    if (!transcript) throw new Error('Gemini zwrócił pustą transkrypcję');
 
     const out = document.getElementById('tr-out');
     if (out) out.value = transcript;
     if (db && edId) dbPatch(edId, {transcript});
-    if (fbUser) { const {audioAB, ...meta} = edRec || {}; fbSaveRec({...meta, id: edId, transcript}); }
+    if (fbUser) fbSaveRec({...(edRec||{}), audioAB: undefined, id: edId, transcript});
 
     setTrBar(100); setTrStatus('✓ Transkrypcja gotowa', false);
     setTimeout(() => setTrStatus(''), 4000);
@@ -1657,12 +1667,14 @@ async function transcribeAudio() {
 
   } catch(e) {
     console.error('Transcription error:', e);
-    setTrStatus('Błąd: ' + e.message, false);
-    let msg = e.message;
+    let msg = e.message || String(e);
     if (msg.includes('quota') || msg.includes('RESOURCE_EXHAUSTED')) {
-      msg = 'Limit API przekroczony — poczekaj minutę i spróbuj ponownie. Możesz też wpisać własny klucz Gemini.';
+      msg = 'Limit API — poczekaj 60s i spróbuj ponownie';
+    } else if (msg.includes('not found') || msg.includes('not supported')) {
+      msg = 'Model Gemini niedostępny — skontaktuj się z pomocą';
     }
-    toast(msg);
+    setTrStatus('Błąd: ' + msg, false);
+    toast('Błąd: ' + msg);
   }
   if (btn) { btn.disabled = false; btn.textContent = '▶ Transcribe audio'; }
 }
@@ -2166,7 +2178,9 @@ async function fbSyncLocalRecs() {
     }
     if (synced > 0) {
       console.log('Synced', synced, 'local recordings to Firestore');
-      toast('Zsynchronizowano ' + synced + ' nagrań z chmurą');
+      toast('Zsynchronizowano ' + synced + ' nagrań ☁');
+      // Refresh history if currently visible
+      if (document.getElementById('s-hist')?.classList.contains('on')) renderHist();
     }
   } catch(e) {
     console.warn('fbSyncLocalRecs error:', e);
