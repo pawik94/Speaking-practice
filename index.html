@@ -1990,6 +1990,7 @@ async function fetchOpenAI(body) {
 // Levels: 0=new/failed  1=hard(1d)  2=ok(4d)  3=good(10d)  4=mastered(30d)
 const SRS_INTERVALS = [0, 1, 4, 10, 30]; // days per level
 var srsData = {}; // {word: {level, nextReview, seen}}
+var srsSessionMarked = new Set(); // cleared each new vocab set
 
 function srsKey() { return 'srs_' + vocCategory; }
 
@@ -2001,11 +2002,18 @@ function srsLoad() {
 }
 
 function srsSave() {
-  try { localStorage.setItem(srsKey(), JSON.stringify(srsData)); } catch(e) {}
+  // Strip session-only flags before persisting
+  var clean = {};
+  Object.keys(srsData).forEach(function(k) {
+    var e = Object.assign({}, srsData[k]);
+    delete e._markedThisSession;
+    clean[k] = e;
+  });
+  try { localStorage.setItem(srsKey(), JSON.stringify(clean)); } catch(e) {}
   // Sync to Firestore
   if (fbUser) {
     const ud = fbUserDoc();
-    if (ud) ud.collection('srs').doc(vocCategory).set({data: srsData, updatedAt: Date.now()}).catch(()=>{});
+    if (ud) ud.collection('srs').doc(vocCategory).set({data: clean, updatedAt: Date.now()}).catch(()=>{});
   }
 }
 
@@ -2028,10 +2036,9 @@ async function srsFirestoreLoad() {
 }
 
 function srsMark(word, knew, btnRowId) {
+  if (srsSessionMarked.has(word)) return; // already marked this session
+  srsSessionMarked.add(word);
   var entry = srsData[word] || {level: 0, nextReview: 0, seen: 0};
-  // Prevent double-marking in same session
-  if (entry._markedThisSession) return;
-  entry._markedThisSession = true;
   entry.seen = (entry.seen || 0) + 1;
   if (knew) {
     entry.level = Math.min(4, (entry.level || 0) + 1);
@@ -2100,6 +2107,7 @@ function srsStatsLine(pool) {
 
 function showVocabLesson() {
   srsLoad();
+  srsSessionMarked = new Set(); // reset for new session
   var pool = vocCategory === 'idioms' ? ALL_IDIOMS : vocCategory === 'adjectives' ? ALL_ADJECTIVES : ALL_WORDS;
   // SRS: prioritise due reviews, then new words
   var ordered = srsGetDue(pool).slice(0, 6);
@@ -2165,7 +2173,7 @@ function renderVocCards(loaded) {
     }
     // SRS buttons
     var wid = 'srs-'+item.e.replace(/[^a-z0-9]/gi,'_');
-    var alreadyMarked = srsData[item.e] && srsData[item.e].seen > 0;
+    var alreadyMarked = srsSessionMarked.has(item.e);
     if (alreadyMarked) {
       var si = srsLevelLabel(item.e);
       html += '<div id="'+wid+'" style="display:flex;gap:6px;margin-top:10px;opacity:.4;font-size:12px;color:var(--tx3);padding:4px 0">✓ Oceniono: <span style="color:'+si.color+'">'+si.label+'</span></div>';
