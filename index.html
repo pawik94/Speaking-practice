@@ -1021,7 +1021,7 @@ function gen() {
   const pool = selCat === 'All' ? TOPICS : TOPICS.filter(t => t.c === selCat);
   if (!pool.length) { toast('No topics for this category'); return; }
   curTopic = pool[Math.floor(Math.random() * pool.length)];
-  vocabOffset = 0; idiomOffset = 0; linkerState = {};
+  vocabOffset = 0; idiomOffset = 0; linkerState = {}; linkerShowEx = {};
   renderTopic();
   resetTimer();
   recState = 'idle'; liveTranscript = ''; curRecId = null;
@@ -1184,14 +1184,34 @@ function renderLinkersTo(elId) {
   });
 }
 
+var linkerShowEx = {}; // {catKey: bool} — true = show example, false = hide
+
 function buildLinkerCard(catKey, cat, item) {
+  const showEx = linkerShowEx[catKey] !== false; // default show
+  const safeKey = catKey.replace(/'/g, "\\'");
   return `
     <div class="lnk-label" style="color:${cat.color}">${cat.icon} ${cat.label}</div>
     <div class="lnk-phrase" style="color:${cat.color}">${esc(item.phrase)}</div>
     <div class="lnk-use">${esc(item.use)}</div>
-    <div class="lnk-ex">${esc(item.ex)}</div>
-    <button class="lnk-btn" onclick="nextLinker('${catKey}')" title="Show another">↻</button>
+    ${showEx ? `<div class="lnk-ex" id="lnk-ex-${catKey}">${esc(item.ex)}</div>` : `<div id="lnk-ex-${catKey}" style="height:4px"></div>`}
+    <div style="display:flex;gap:6px;align-items:center;margin-top:6px">
+      <button class="lnk-btn" onclick="nextLinker('${safeKey}')" title="Show another">↻</button>
+      <button class="b0" style="font-size:9px;padding:2px 6px;border-radius:4px" onclick="toggleLinkerEx('${safeKey}')" title="Show/hide example">
+        ${showEx ? 'Hide example' : 'Show example'}
+      </button>
+    </div>
   `;
+}
+
+function toggleLinkerEx(catKey) {
+  linkerShowEx[catKey] = !(linkerShowEx[catKey] !== false);
+  const cat = LINKERS[catKey];
+  if (!cat) return;
+  const idx = (linkerState[catKey] || 0) % cat.items.length;
+  const item = cat.items[idx];
+  document.querySelectorAll(`.lnk-card[data-cat="${catKey}"]`).forEach(card => {
+    card.innerHTML = buildLinkerCard(catKey, cat, item);
+  });
 }
 
 function nextLinker(catKey) {
@@ -2927,7 +2947,7 @@ function toggleBkmFromBrowser(q, cat, btn) {
 }
 function selectTopicFromBrowser(t) {
   curTopic = t;
-  vocabOffset = 0; idiomOffset = 0; linkerState = {};
+  vocabOffset = 0; idiomOffset = 0; linkerState = {}; linkerShowEx = {};
   resetTimer();
   recState = 'idle'; liveTranscript = ''; curRecId = null;
   var notesEl = document.getElementById('topic-notes'); if (notesEl) notesEl.value = '';
