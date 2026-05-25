@@ -1460,11 +1460,55 @@ async function delRec(id) {
 async function openEd(id) {
   edFrom = document.getElementById('s-hist').classList.contains('on') ? 'hist' : 'prac';
   try {
-    const rec = await dbGet(id);
+    // Try local IndexedDB first
+    let rec = await dbGet(id);
+    let audioAB = rec ? rec.audioAB : null;
+
+    // If no local audio, try fetching from Firebase Storage
+    if (!audioAB && fbUser) {
+      toast('Fetching audio from cloud…');
+      // Try audioUrl from Firestore metadata
+      let audioUrl = rec ? rec.audioUrl : null;
+      if (!audioUrl) {
+        // Try to get directly from Storage path
+        audioUrl = await fbGetAudioUrl(id);
+      }
+      if (audioUrl) {
+        try {
+          const resp = await fetch(audioUrl);
+          const ab = await resp.arrayBuffer();
+          audioAB = ab;
+          // Cache locally for future use
+          if (rec) {
+            rec.audioAB = ab;
+            await dbSave(rec);
+          } else {
+            // Build minimal rec from Firestore
+            const ud = fbUserDoc();
+            const snap = await ud.collection('recordings').doc(String(id)).get();
+            if (snap.exists) {
+              rec = snap.data();
+              rec.audioAB = ab;
+              await dbSave(rec);
+            }
+          }
+          toast('Audio loaded from cloud ✓');
+        } catch(e) {
+          console.warn('Storage fetch failed:', e);
+          toast('Could not load audio from cloud: ' + e.message);
+          return;
+        }
+      } else {
+        toast('Audio not found in cloud — only available on original device');
+        return;
+      }
+    }
+
     if (!rec) { toast('Recording not found'); return; }
-    // Support both new audioAB (WebM ArrayBuffer) and old audio (Float32 arrays)
-    if (rec.audioAB) {
-      curBuf = (id === curRecId && curBufCache) ? curBufCache : await abToAudioBuf(rec.audioAB);
+
+    // Decode audio
+    if (audioAB) {
+      curBuf = (id === curRecId && curBufCache) ? curBufCache : await abToAudioBuf(audioAB);
     } else if (rec.audio) {
       // Legacy format
       const ac2 = getDecodeAC();
@@ -2481,7 +2525,7 @@ const FB_CONFIG = {
   appId: "1:659411443564:web:36cdd181f76508fd0a1d49"
 };
 
-let fbApp, fbAuth, fbDb, fbUser = null;
+let fbApp, fbAuth, fbDb, fbSt, fbUser = null;
 
 function showLoginOverlay() {
   document.getElementById('login-overlay').style.display = 'flex';
@@ -2535,6 +2579,7 @@ function initFirebase() {
     fbApp = firebase.initializeApp(FB_CONFIG);
     fbAuth = firebase.auth();
     fbDb   = firebase.firestore();
+    try { fbSt = firebase.storage(); } catch(e) { console.warn('Storage not available:', e); }
 
     fbAuth.onAuthStateChanged(user => {
       fbUser = user;
@@ -2577,8 +2622,32 @@ function fbUserDoc() {
 async function fbSaveRec(rec) {
   const ud = fbUserDoc(); if (!ud) return;
   const { audioAB, ...meta } = rec;
+
+  // Upload audio to Firebase Storage if available
+  if (fbSt && audioAB && audioAB.byteLength > 0 && !meta.audioUrl) {
+    try {
+      const path = `users/${fbUser.uid}/recordings/${rec.id}.webm`;
+      const ref = fbSt.ref(path);
+      const blob = new Blob([audioAB], { type: 'audio/webm' });
+      await ref.put(blob);
+      meta.audioUrl = await ref.getDownloadURL();
+      meta.audioPath = path;
+      console.log('Audio uploaded to Storage:', meta.audioUrl);
+    } catch(e) {
+      console.warn('Storage upload failed (non-fatal):', e);
+    }
+  }
+
   try { await ud.collection('recordings').doc(String(rec.id)).set(meta, { merge: true }); }
-  catch(e) { console.warn('fbSaveRec:', e); }
+  catch(e) { console.warn('fbSaveRec Firestore:', e); }
+}
+
+async function fbGetAudioUrl(recId) {
+  if (!fbUser || !fbSt) return null;
+  try {
+    const path = `users/${fbUser.uid}/recordings/${recId}.webm`;
+    return await fbSt.ref(path).getDownloadURL();
+  } catch(e) { return null; }
 }
 
 async function fbGetAll() {
@@ -2677,9 +2746,12 @@ renderHist = async function() {
       const hasAudio = localIds.has(r.id);
       const div = document.createElement('div');
       div.className = 'hi'; div.id = 'hi-' + r.id;
+      const hasUrl = !!(r.audioUrl || r.audioPath);
       const audioBtn = hasAudio
         ? `<button class="b0 sm" onclick="openEd(${r.id})">✏ Edit</button><button class="bg sm" onclick="dlWavById(${r.id})">↓ WAV</button>`
-        : `<span style="font-size:11px;color:var(--tx3);padding:4px 8px">🔒 audio na innym urządzeniu</span>`;
+        : hasUrl
+          ? `<button class="b0 sm" onclick="openEd(${r.id})">☁ Open</button>`
+          : `<span style="font-size:11px;color:var(--tx3);padding:4px 8px">🔒 no audio</span>`;
       div.innerHTML = `<div style="flex:1;min-width:0"><div class="hn">${esc(r.name)}</div><div class="hm">${ds} · ${dur}${r.transcript ? ' · ✓ transkrypcja' : ''}</div></div><div class="ha">${audioBtn}<button class="b0 sm" onclick="renameRec(${r.id})">✎</button><button class="bd sm" onclick="delRec(${r.id})">✕</button></div>`;
       list.appendChild(div);
     });
@@ -2742,7 +2814,9 @@ function loadFirebase() {
   load(base + 'firebase-app-compat.js', () => {
     load(base + 'firebase-auth-compat.js', () => {
       load(base + 'firebase-firestore-compat.js', () => {
-        initFirebase();
+        load(base + 'firebase-storage-compat.js', () => {
+          initFirebase();
+        });
       });
     });
   });
