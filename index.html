@@ -1473,33 +1473,38 @@ async function openEd(id) {
         // Try to get directly from Storage path
         audioUrl = await fbGetAudioUrl(id);
       }
-      if (audioUrl) {
-        try {
-          const resp = await fetch(audioUrl);
-          const ab = await resp.arrayBuffer();
-          audioAB = ab;
-          // Cache locally for future use
-          if (rec) {
-            rec.audioAB = ab;
-            await dbSave(rec);
-          } else {
-            // Build minimal rec from Firestore
-            const ud = fbUserDoc();
-            const snap = await ud.collection('recordings').doc(String(id)).get();
-            if (snap.exists) {
-              rec = snap.data();
-              rec.audioAB = ab;
-              await dbSave(rec);
-            }
-          }
-          toast('Audio loaded from cloud ✓');
-        } catch(e) {
-          console.warn('Storage fetch failed:', e);
-          toast('Could not load audio from cloud: ' + e.message);
-          return;
+      // Try to get the storage path
+      const storagePath = (rec && rec.audioPath)
+        ? rec.audioPath
+        : `users/${fbUser.uid}/recordings/${id}.webm`;
+
+      try {
+        toast('Downloading audio from cloud…');
+        // Use Firebase SDK getBytes() — avoids CORS issues with direct fetch()
+        const MAX_SIZE = 30 * 1024 * 1024; // 30MB
+        const bytes = await fbSt.ref(storagePath).getBytes(MAX_SIZE);
+        audioAB = bytes.buffer;
+
+        // Cache locally for future offline use
+        if (!rec) {
+          const ud = fbUserDoc();
+          const snap = await ud.collection('recordings').doc(String(id)).get();
+          if (snap.exists) rec = snap.data();
         }
-      } else {
-        toast('Audio not found in cloud — only available on original device');
+        if (rec) {
+          rec.audioAB = audioAB;
+          // Save locally without re-uploading (audioUrl already set)
+          const origDbSave = _origDbSave || dbSave;
+          await origDbSave(rec);
+        }
+        toast('Audio loaded from cloud ✓');
+      } catch(e) {
+        console.warn('Storage download failed:', e);
+        if (e.code === 'storage/object-not-found') {
+          toast('Audio not yet uploaded — open this recording on the original device first');
+        } else {
+          toast('Download failed: ' + (e.message || e.code));
+        }
         return;
       }
     }
@@ -2556,8 +2561,13 @@ async function fbSyncLocalRecs() {
     let synced = 0;
     for (const rec of local) {
       if (!fbIds.has(String(rec.id))) {
-        await fbSaveRec(rec);
-        synced++;
+        try {
+          await fbSaveRec(rec);
+          synced++;
+          console.log('Synced rec', rec.id, rec.name);
+        } catch(e) {
+          console.warn('Sync failed for rec', rec.id, e);
+        }
       }
     }
     if (synced > 0) {
@@ -2646,7 +2656,9 @@ async function fbGetAudioUrl(recId) {
   if (!fbUser || !fbSt) return null;
   try {
     const path = `users/${fbUser.uid}/recordings/${recId}.webm`;
-    return await fbSt.ref(path).getDownloadURL();
+    // Just check if it exists by getting metadata
+    await fbSt.ref(path).getMetadata();
+    return path; // return path, not URL — we use getBytes() now
   } catch(e) { return null; }
 }
 
