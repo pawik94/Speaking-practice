@@ -1020,7 +1020,15 @@ function showHist() { go('hist'); renderHist(); }
 function gen() {
   const pool = selCat === 'All' ? TOPICS : TOPICS.filter(t => t.c === selCat);
   if (!pool.length) { toast('No topics for this category'); return; }
-  curTopic = pool[Math.floor(Math.random() * pool.length)];
+  // Prefer least-recorded topics (weighted random)
+  const counts = topicCountLoad();
+  const weighted = [];
+  pool.forEach(function(t) {
+    const n = counts[t.q] || 0;
+    const weight = Math.max(1, 5 - n); // 0 recs=5, 1=4, 2=3, 3=2, 4+=1
+    for (var i = 0; i < weight; i++) weighted.push(t);
+  });
+  curTopic = weighted[Math.floor(Math.random() * weighted.length)];
   vocabOffset = 0; idiomOffset = 0; linkerState = {}; linkerShowEx = {};
   renderTopic();
   resetTimer();
@@ -1433,6 +1441,22 @@ function confirmCustomTopic() {
   const c = document.getElementById('ct-c').value;
   const d = document.getElementById('ct-d').value;
   curTopic = { q, c, d, t, w: [], custom: true };
+  // Save to localStorage so it appears in Browse Topics
+  try {
+    var customs = JSON.parse(localStorage.getItem('customTopics') || '[]');
+    if (!customs.find(function(x){ return x.q === q; })) {
+      customs.push({q, c, d, t, w: [], custom: true});
+      localStorage.setItem('customTopics', JSON.stringify(customs));
+    }
+  } catch(e) {}
+  // Sync to Firestore
+  if (fbUser) {
+    try {
+      var customs2 = JSON.parse(localStorage.getItem('customTopics') || '[]');
+      const ud = fbUserDoc();
+      if (ud) ud.collection('settings').doc('customTopics').set({topics: customs2, updatedAt: Date.now()}).catch(()=>{});
+    } catch(e) {}
+  }
   vocabOffset = 0; idiomOffset = 0;
   resetTimer();
   recState = 'idle'; liveTranscript = ''; curRecId = null;
@@ -1529,7 +1553,7 @@ async function openEd(id) {
     // Reset analysis panel
     apOpen = false; document.getElementById('abody').style.display = 'none'; document.getElementById('aarr').textContent = '▼';
     aTabActive = 'tr'; showATab('tr');
-    document.getElementById('an-out').innerHTML = '<p style="font-size:13px;color:var(--tx2)">Click "Analyse recording" to get feedback based on your audio and transcript.</p>';
+    document.getElementById('an-out').innerHTML = '';
     updCutUI(); updUndoBtn(); updCutApply();
     trInitKey();
     go('ed');
@@ -1831,28 +1855,25 @@ function setTrBar(pct) {
 // ═══════════════════════ ANALYSIS (audio waveform + transcript) ═══════════════════════
 function runAnalysis(){
   if(!curBuf){toast('No recording loaded');return;}
+  const transcript = document.getElementById('tr-out')?.value?.trim() || '';
+  if (!transcript) { toast('Run transcription first — AI needs the transcript'); return; }
   const btn=document.getElementById('bana');
-  if(btn){btn.innerHTML='<span class="spin"></span>Analysing…';btn.disabled=true;}
-  setTimeout(async ()=>{
-    try{
-      const transcript = document.getElementById('tr-out')?.value || '';
-      const topic = edRec?.topic || curTopic?.q || null;
-      const result=analyseAudio(curBuf, transcript, topic);
-      renderAnalysis(result,document.getElementById('an-out'));
-      // Run AI feedback if transcript available
-      if(transcript && transcript.length > 20){
-        await runAIFeedback(transcript, topic, result);
-      }
-    }catch(e){document.getElementById('an-out').innerHTML=`<p style="color:var(--rd);font-size:13px">Error: ${e.message}</p>`;}
-    if(btn){btn.textContent='▶ Analyse recording';btn.disabled=false;}
-  },30);
+  if(btn){btn.innerHTML='<span class="spin"></span>Getting AI feedback…';btn.disabled=true;}
+  const topic = (edRec && edRec.topic) || (curTopic && curTopic.q) || null;
+  const anOut = document.getElementById('an-out');
+  if (anOut) anOut.innerHTML = '';
+  const aiFbEl = document.getElementById('ai-feedback-out');
+  if (aiFbEl) aiFbEl.innerHTML = '';
+  // Go straight to AI feedback — no waveform stats section
+  runAIFeedback(transcript, topic, {wpm:0, fillerCount:0, pauses:[], longPauses:0})
+    .finally(function(){ if(btn){btn.textContent='▶ Analyse recording';btn.disabled=false;} });
 }
 
 async function runAIFeedback(transcript, topic, waveStats) {
   // Find or create AI feedback container (appended after waveform analysis)
   let container = document.getElementById('ai-feedback-out');
   if (!container) {
-    const anOut = document.getElementById('an-out');
+    const anOut = document.getElementById('an-out') || document.getElementById('ai-feedback-out');
     if (!anOut) return;
     container = document.createElement('div');
     container.id = 'ai-feedback-out';
@@ -2458,7 +2479,8 @@ function stopVocRec() {
 async function onVocRecStop() {
   var blob = new Blob(vocChunks, {type: 'audio/webm'});
   try {
-    var ab = await blob.arrayBuffer(); vocBuf = await abToAudioBuf(ab);
+    var rawAB = await blob.arrayBuffer();
+    vocBuf = await abToAudioBuf(rawAB);
     var dd = document.getElementById('voc-dur'); if (dd) dd.textContent = Math.round(vocBuf.duration) + 's';
     document.getElementById('voc-rec-done').style.display = '';
     document.getElementById('voc-rec-live').style.display = 'none';
@@ -2466,7 +2488,50 @@ async function onVocRecStop() {
     if (out && vocTranscript.trim()) {
       out.value = out.value ? out.value.trimEnd() + '\n\n' + vocTranscript.trim() : vocTranscript.trim();
     }
+    // Save to IndexedDB + Firestore so it appears in history
+    var topicQ = curTopic ? curTopic.q : 'Vocabulary Practice';
+    var recId = Date.now();
+    var recObj = {
+      id: recId, name: topicQ, date: Date.now(), dur: vocBuf.duration,
+      audioAB: rawAB, topic: topicQ, source: 'vocab'
+    };
+    if (db) {
+      await dbSave(recObj);
+      toast('Recording saved to history');
+    }
+    // Show transcript & enable analyse
+    var analyseBtn = document.getElementById('voc-analyse-btn');
+    if (analyseBtn) analyseBtn.disabled = false;
+    // Auto-transcribe with Groq if transcript is empty
+    if (out && !out.value.trim()) {
+      await vocAutoTranscribe(rawAB, out);
+    }
   } catch(err) { toast('Recording error: ' + err.message); }
+}
+
+async function vocAutoTranscribe(rawAB, outEl) {
+  try {
+    var statusEl = document.getElementById('voc-dur');
+    if (statusEl) statusEl.textContent = 'Transcribing…';
+    var blob = new Blob([rawAB], {type: 'audio/webm'});
+    var form = new FormData();
+    form.append('file', new File([blob], 'rec.webm', {type: 'audio/webm'}));
+    form.append('model', 'whisper-large-v3');
+    form.append('language', 'en');
+    form.append('response_format', 'text');
+    var res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: {'Authorization': 'Bearer ' + GROQ_KEY_TEXT},
+      body: form
+    });
+    if (res.ok) {
+      var text = (await res.text()).trim();
+      if (text && outEl) {
+        outEl.value = outEl.value ? outEl.value.trimEnd() + '\n\n' + text : text;
+      }
+      if (statusEl) statusEl.textContent = Math.round(vocBuf.duration) + 's · transcribed ✓';
+    }
+  } catch(e) { console.warn('vocAutoTranscribe error:', e); }
 }
 
 function discardVocRec() {
@@ -2719,7 +2784,7 @@ const _origDbSave = dbSave;
 dbSave = async function(rec) {
   const isNew = !rec.id || !(await dbGet(rec.id));
   await _origDbSave(rec);
-  if (isNew) statsTrackRecording();
+  if (isNew) { statsTrackRecording(); if (rec.topic) topicCountIncrement(rec.topic); }
   if (fbUser) {
     fbSaveRec(rec)
       .then(() => console.log('Saved to Firestore:', rec.id))
@@ -2835,6 +2900,59 @@ function loadFirebase() {
 }
 
 
+async function fbLoadCustomTopics() {
+  if (!fbUser) return;
+  try {
+    const ud = fbUserDoc();
+    const snap = await ud.collection('settings').doc('customTopics').get();
+    if (snap.exists && snap.data().topics) {
+      const remote = snap.data().topics;
+      var local = [];
+      try { local = JSON.parse(localStorage.getItem('customTopics') || '[]'); } catch(e) {}
+      // Merge: combine and deduplicate by q
+      var merged = [...local];
+      remote.forEach(function(r) {
+        if (!merged.find(function(l) { return l.q === r.q; })) merged.push(r);
+      });
+      localStorage.setItem('customTopics', JSON.stringify(merged));
+    }
+  } catch(e) { console.warn('fbLoadCustomTopics error:', e); }
+}
+
+function topicCountKey() { return 'topic_rec_counts'; }
+function topicCountLoad() {
+  try { return JSON.parse(localStorage.getItem(topicCountKey()) || '{}'); } catch(e) { return {}; }
+}
+function topicCountSave(counts) {
+  localStorage.setItem(topicCountKey(), JSON.stringify(counts));
+  if (fbUser) {
+    const ud = fbUserDoc();
+    if (ud) ud.collection('settings').doc('topicRecCounts').set({counts, updatedAt: Date.now()}).catch(()=>{});
+  }
+}
+function topicCountIncrement(topicQ) {
+  if (!topicQ) return;
+  var counts = topicCountLoad();
+  counts[topicQ] = (counts[topicQ] || 0) + 1;
+  topicCountSave(counts);
+}
+async function topicCountFirestoreLoad() {
+  if (!fbUser) return;
+  try {
+    const ud = fbUserDoc();
+    const snap = await ud.collection('settings').doc('topicRecCounts').get();
+    if (snap.exists && snap.data().counts) {
+      var remote = snap.data().counts;
+      var local = topicCountLoad();
+      // Merge: take max per topic
+      Object.keys(remote).forEach(function(k) {
+        local[k] = Math.max(local[k] || 0, remote[k] || 0);
+      });
+      localStorage.setItem(topicCountKey(), JSON.stringify(local));
+    }
+  } catch(e) {}
+}
+
 // ════════════════════════ STATS & STREAK ════════════════════════
 var appStats = {streak:0, lastActive:'', totalTopics:0, totalRecordings:0};
 
@@ -2854,16 +2972,33 @@ async function statsFirestoreLoad() {
   try {
     const ud = fbUserDoc();
     const snap = await ud.collection('settings').doc('stats').get();
-    if (snap.exists) {
-      const remote = snap.data();
-      // Take max values to avoid regression
-      appStats.streak = Math.max(appStats.streak, remote.streak||0);
-      appStats.totalTopics = Math.max(appStats.totalTopics, remote.totalTopics||0);
-      appStats.totalRecordings = Math.max(appStats.totalRecordings, remote.totalRecordings||0);
-      if (!appStats.lastActive && remote.lastActive) appStats.lastActive = remote.lastActive;
-      localStorage.setItem(statsKey(), JSON.stringify(appStats));
+    if (!snap.exists) {
+      // No remote data — push local to Firestore
+      statsSave();
+      return;
     }
-  } catch(e) {}
+    const remote = snap.data();
+    // Merge: use the device that was active more recently
+    const localDate  = appStats.lastActive  || '';
+    const remoteDate = remote.lastActive || '';
+
+    if (remoteDate > localDate) {
+      // Remote is newer — adopt remote streak and lastActive wholesale
+      appStats.streak     = remote.streak     || 0;
+      appStats.lastActive = remote.lastActive || '';
+    } else if (localDate > remoteDate) {
+      // Local is newer — push to Firestore
+      statsSave();
+      return;
+    }
+    // Always take the higher totals (recordings + topics are additive)
+    appStats.totalTopics     = Math.max(appStats.totalTopics||0,     remote.totalTopics||0);
+    appStats.totalRecordings = Math.max(appStats.totalRecordings||0, remote.totalRecordings||0);
+    localStorage.setItem(statsKey(), JSON.stringify(appStats));
+    // Push merged result back to Firestore
+    const ud2 = fbUserDoc();
+    if (ud2) ud2.collection('settings').doc('stats').set(appStats).catch(()=>{});
+  } catch(e) { console.warn('statsFirestoreLoad error:', e); }
 }
 function statsTrackTopic() {
   statsLoad();
@@ -3002,13 +3137,15 @@ function renderTopicBrowser() {
     var isBkm = !!bookmarks[t.q];
     var div = document.createElement('div');
     div.style.cssText = 'background:var(--bg2);border:1px solid var(--b2);border-radius:10px;padding:12px 14px;cursor:pointer;display:flex;gap:10px;align-items:flex-start';
+    var tCount = topicCountLoad()[t.q] || 0;
     div.innerHTML = '<div style="flex:1;min-width:0">'
       + '<div style="font-size:13.5px;font-weight:600;line-height:1.45;margin-bottom:4px">' + esc(t.q) + '</div>'
-      + '<div style="display:flex;gap:6px;flex-wrap:wrap">'
+      + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">'
       + '<span style="font-size:10px;color:var(--tx3);background:var(--bg);padding:2px 7px;border-radius:4px">' + (t.c||'General') + '</span>'
       + (t.d ? '<span style="font-size:10px;color:var(--tx3);background:var(--bg);padding:2px 7px;border-radius:4px">' + t.d + '</span>' : '')
       + (t._custom ? '<span style="font-size:10px;color:#f59e0b;background:rgba(245,158,11,.1);padding:2px 7px;border-radius:4px">✏ My topic</span>' : '')
-      + (isBkm ? '<span style="font-size:10px;color:#f59e0b">🏷️ Bookmarked</span>' : '')
+      + (isBkm ? '<span style="font-size:10px;color:#f59e0b">🏷️</span>' : '')
+      + '<span style="font-size:10px;color:' + (tCount===0?'var(--tx3)':'var(--ac)') + '">🎙 ' + tCount + '</span>'
       + '</div></div>'
       + '<button class="b0 sm" style="flex-shrink:0;font-size:11px" onclick="event.stopPropagation();toggleBkmFromBrowser(\''+t.q.replace(/'/g,"\\'")+'\',' + JSON.stringify(t.c||'') + ',this)">'
       + (isBkm ? '🏷️' : '🔖') + '</button>';
