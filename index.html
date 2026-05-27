@@ -144,7 +144,7 @@ textarea.trb:focus{outline:none;border-color:var(--ac)}
   <div style="text-align:center">
     <div id="stat-streak" style="font-size:22px;font-weight:700">🔥 0</div>
     <div style="font-size:10px;color:var(--tx3);text-transform:uppercase;letter-spacing:.06em">Streak (recordings)</div>
-    <button class="b0" style="font-size:9px;padding:1px 6px;margin-top:3px;border-radius:4px;opacity:.5" onclick="resetStreak()">reset</button>
+    <button class="b0" style="font-size:9px;padding:1px 6px;margin-top:3px;border-radius:4px;opacity:.5" onclick="resetStreak()">Reset all</button>
   </div>
   <div style="text-align:center">
     <div id="stat-topics" style="font-size:22px;font-weight:700">0</div>
@@ -2698,6 +2698,20 @@ async function fbSyncLocalRecs() {
   }
 }
 
+
+async function fbSyncAll(user) {
+  toast('Zalogowano: ' + (user.displayName || user.email));
+  // Run all syncs in parallel
+  await Promise.allSettled([
+    fbLoadSettings(),
+    statsFirestoreLoad().then(renderStats),
+    fbLoadCustomTopics(),
+    topicCountFirestoreLoad(),
+    loadGroqKeyFromFirestore(),
+    fbSyncLocalRecs(),
+  ]);
+}
+
 function initFirebase() {
   // Clear any stale API keys that might override built-in ones
   if (localStorage.getItem('gemini_key')) localStorage.removeItem('gemini_key');
@@ -2712,8 +2726,7 @@ function initFirebase() {
       fbUser = user;
       if (user) {
         hideLoginOverlay(user);
-        fbLoadSettings();
-        toast('Zalogowano: ' + (user.displayName || user.email));
+        fbSyncAll(user);
       } else {
         showLoginOverlay();
       }
@@ -3000,18 +3013,28 @@ async function fbLoadCustomTopics() {
   try {
     const ud = fbUserDoc();
     const snap = await ud.collection('settings').doc('customTopics').get();
+    var local = [];
+    try { local = JSON.parse(localStorage.getItem('customTopics') || '[]'); } catch(e) {}
+
     if (snap.exists && snap.data().topics) {
       const remote = snap.data().topics;
-      var local = [];
-      try { local = JSON.parse(localStorage.getItem('customTopics') || '[]'); } catch(e) {}
+      // Merge remote into local (dedupe by q)
       var merged = [...local];
       remote.forEach(function(r) {
         if (!merged.find(function(l) { return l.q === r.q; })) merged.push(r);
       });
       localStorage.setItem('customTopics', JSON.stringify(merged));
-      // Refresh browser if open
-      if (document.getElementById('s-topics')?.classList.contains('on')) renderTopicBrowser();
+      // If we added anything, push merged back
+      if (merged.length > remote.length) {
+        ud.collection('settings').doc('customTopics')
+          .set({topics: merged, updatedAt: Date.now()}).catch(()=>{});
+      }
+    } else if (local.length > 0) {
+      // No remote — push local to Firestore
+      ud.collection('settings').doc('customTopics')
+        .set({topics: local, updatedAt: Date.now()}).catch(()=>{});
     }
+    if (document.getElementById('s-topics')?.classList.contains('on')) renderTopicBrowser();
   } catch(e) { console.warn('fbLoadCustomTopics error:', e); }
 }
 
@@ -3121,13 +3144,11 @@ function statsTrackRecording() {
   renderStats();
 }
 function resetStreak() {
-  if (!confirm('Reset streak to 0?')) return;
-  statsLoad();
-  appStats.streak = 0;
-  appStats.lastActive = '';
+  if (!confirm('Reset all stats? (streak, topics, recordings, last session)')) return;
+  appStats = {streak: 0, lastActive: '', totalTopics: 0, totalRecordings: 0};
   statsSave();
   renderStats();
-  toast('Streak reset');
+  toast('Stats reset');
 }
 function renderStats() {
   statsLoad();
