@@ -2123,6 +2123,7 @@ function getGeminiUrl(model) {
 }
 // GEMINI_URL removed — using Groq for text
 
+const GROQ_KEY_TEXT = "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";
 async function fetchGemini(prompt) {
   // Using Groq Llama for all text generation (Gemini quota is 0 on this key)
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
