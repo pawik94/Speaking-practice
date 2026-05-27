@@ -2695,26 +2695,33 @@ function fbUserDoc() {
 }
 
 async function fbSaveRec(rec) {
-  const ud = fbUserDoc(); if (!ud) return;
+  const ud = fbUserDoc();
+  if (!ud) { console.warn('fbSaveRec: no user doc'); return; }
   const { audioAB, ...meta } = rec;
 
-  // Upload audio to Firebase Storage if available
-  if (fbSt && audioAB && audioAB.byteLength > 0 && !meta.audioUrl) {
-    try {
-      const path = `users/${fbUser.uid}/recordings/${rec.id}.webm`;
-      const ref = fbSt.ref(path);
-      const blob = new Blob([audioAB], { type: 'audio/webm' });
-      await ref.put(blob);
-      meta.audioUrl = await ref.getDownloadURL();
-      meta.audioPath = path;
-      console.log('Audio uploaded to Storage:', meta.audioUrl);
-    } catch(e) {
-      console.warn('Storage upload failed (non-fatal):', e);
-    }
+  // Save metadata to Firestore FIRST (fast, always works)
+  try {
+    await ud.collection('recordings').doc(String(rec.id)).set(meta, { merge: true });
+    console.log('✓ Firestore metadata saved:', rec.id, rec.name);
+  } catch(e) {
+    console.error('✗ Firestore metadata FAILED:', e);
+    toast('Cloud sync failed: ' + e.message);
+    return;
   }
 
-  try { await ud.collection('recordings').doc(String(rec.id)).set(meta, { merge: true }); }
-  catch(e) { console.warn('fbSaveRec Firestore:', e); }
+  // Then upload audio to Storage in background (non-blocking)
+  if (fbSt && audioAB && audioAB.byteLength > 0 && !meta.audioUrl) {
+    const path = 'users/' + fbUser.uid + '/recordings/' + rec.id + '.webm';
+    const ref = fbSt.ref(path);
+    const blob = new Blob([audioAB], { type: 'audio/webm' });
+    ref.put(blob).then(async () => {
+      const url = await ref.getDownloadURL();
+      await ud.collection('recordings').doc(String(rec.id)).update({ audioUrl: url, audioPath: path });
+      console.log('✓ Audio uploaded to Storage:', rec.id);
+    }).catch(e => {
+      console.warn('Storage upload failed (audio still local):', e.code, e.message);
+    });
+  }
 }
 
 async function fbGetAudioUrl(recId) {
@@ -2786,9 +2793,8 @@ dbSave = async function(rec) {
   await _origDbSave(rec);
   if (isNew) { statsTrackRecording(); if (rec.topic) topicCountIncrement(rec.topic); }
   if (fbUser) {
-    fbSaveRec(rec)
-      .then(() => console.log('Saved to Firestore:', rec.id))
-      .catch(e => console.warn('Firestore save failed:', e));
+    // AWAIT so user sees the result — fbSaveRec shows toast on failure
+    await fbSaveRec(rec);
   }
   // If not logged in yet, fbSyncLocalRecs will pick it up on next login
 };
@@ -2802,39 +2808,76 @@ dbDel = async function(id) {
 // ── Patch renderHist to load from Firestore ───────────────────────────────
 const _origRenderHist = renderHist;
 renderHist = async function() {
-  if (!fbUser) { await _origRenderHist(); return; }
   const list = document.getElementById('hist-list');
-  list.innerHTML = '<p style="color:var(--tx3);font-size:13px;text-align:center;padding:30px 0">Ładowanie z chmury…</p>';
-  try {
-    const fbRecs = await fbGetAll();
-    let localIds = new Set();
-    try { const local = await dbGetAll(); local.forEach(r => localIds.add(r.id)); } catch(e) {}
+  list.innerHTML = '<p style="color:var(--tx3);font-size:13px;text-align:center;padding:30px 0">Ładowanie…</p>';
 
-    const recs = fbRecs || [];
-    if (!recs.length) {
-      list.innerHTML = '<p style="color:var(--tx3);font-size:13px;text-align:center;padding:40px 0">Brak nagrań.<br>Nagraj się podczas sesji ćwiczeniowej.</p>';
-      return;
+  // Always load local recordings first
+  let localRecs = [];
+  try { localRecs = await dbGetAll() || []; } catch(e) {}
+  const localIds = new Set(localRecs.map(r => r.id));
+
+  // Merge with Firestore if logged in
+  let merged = [...localRecs];
+  let cloudIds = new Set();
+  if (fbUser) {
+    try {
+      const fbRecs = await fbGetAll();
+      if (fbRecs && fbRecs.length) {
+        fbRecs.forEach(r => {
+          cloudIds.add(r.id);
+          if (!localIds.has(r.id)) {
+            merged.push(r); // cloud-only record
+          }
+        });
+      }
+    } catch(e) {
+      console.warn('Firestore load failed, showing local only:', e);
     }
-    list.innerHTML = '';
-    recs.forEach(r => {
-      const dt = new Date(r.date);
-      const ds = dt.toLocaleDateString('pl-PL') + ' · ' + dt.toLocaleTimeString('pl-PL',{hour:'2-digit',minute:'2-digit'});
-      const dur = r.dur ? r.dur.toFixed(1)+'s' : '?';
-      const hasAudio = localIds.has(r.id);
-      const div = document.createElement('div');
-      div.className = 'hi'; div.id = 'hi-' + r.id;
-      const hasUrl = !!(r.audioUrl || r.audioPath);
-      const audioBtn = hasAudio
-        ? `<button class="b0 sm" onclick="openEd(${r.id})">✏ Edit</button><button class="bg sm" onclick="dlWavById(${r.id})">↓ WAV</button>`
-        : hasUrl
-          ? `<button class="b0 sm" onclick="openEd(${r.id})">☁ Open</button>`
-          : `<span style="font-size:11px;color:var(--tx3);padding:4px 8px">🔒 no audio</span>`;
-      div.innerHTML = `<div style="flex:1;min-width:0"><div class="hn">${esc(r.name)}</div><div class="hm">${ds} · ${dur}${r.transcript ? ' · ✓ transkrypcja' : ''}</div></div><div class="ha">${audioBtn}<button class="b0 sm" onclick="renameRec(${r.id})">✎</button><button class="bd sm" onclick="delRec(${r.id})">✕</button></div>`;
-      list.appendChild(div);
-    });
-  } catch(e) {
-    list.innerHTML = `<p style="color:var(--rd);font-size:13px;text-align:center;padding:30px 0">Błąd: ${e.message}</p>`;
   }
+
+  // Sort by date desc
+  merged.sort((a, b) => (b.date || 0) - (a.date || 0));
+
+  if (!merged.length) {
+    list.innerHTML = '<p style="color:var(--tx3);font-size:13px;text-align:center;padding:40px 0">Brak nagrań.<br>Nagraj się podczas sesji ćwiczeniowej.</p>';
+    return;
+  }
+
+  // Add sync button if logged in and have un-synced local recs
+  const unsynced = localRecs.filter(r => !cloudIds.has(r.id)).length;
+  list.innerHTML = '';
+  if (fbUser && unsynced > 0) {
+    const syncBar = document.createElement('div');
+    syncBar.style.cssText = 'background:rgba(124,111,255,.1);border:1px solid rgba(124,111,255,.3);border-radius:8px;padding:8px 12px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--tx2)';
+    syncBar.innerHTML = unsynced + ' nagrań nie jest w chmurze'
+      + '<button class="bp sm" onclick="fbSyncLocalRecs().then(renderHist)">↑ Sync now</button>';
+    list.appendChild(syncBar);
+  }
+
+  merged.forEach(r => {
+    const dt = new Date(r.date);
+    const ds = dt.toLocaleDateString('pl-PL') + ' · ' + dt.toLocaleTimeString('pl-PL',{hour:'2-digit',minute:'2-digit'});
+    const dur = r.dur ? r.dur.toFixed(1)+'s' : '?';
+    const hasLocal = localIds.has(r.id);
+    const hasCloud = cloudIds.has(r.id);
+    const hasUrl = !!(r.audioUrl || r.audioPath);
+    const div = document.createElement('div');
+    div.className = 'hi'; div.id = 'hi-' + r.id;
+    const audioBtn = hasLocal
+      ? '<button class="b0 sm" onclick="openEd('+r.id+')">✏ Edit</button><button class="bg sm" onclick="dlWavById('+r.id+')">↓ WAV</button>'
+      : (hasUrl || hasCloud)
+        ? '<button class="b0 sm" onclick="openEd('+r.id+')">☁ Open</button>'
+        : '<span style="font-size:11px;color:var(--tx3);padding:4px 8px">🔒 local only</span>';
+    const cloudTag = fbUser
+      ? (hasCloud ? '<span style="font-size:10px;color:var(--gr)">☁</span>' : '<span style="font-size:10px;color:var(--tx3)" title="Not synced">⚠</span>')
+      : '';
+    div.innerHTML = '<div style="flex:1;min-width:0"><div class="hn">' + esc(r.name) + ' ' + cloudTag + '</div>'
+      + '<div class="hm">' + ds + ' · ' + dur + (r.transcript ? ' · ✓' : '') + '</div></div>'
+      + '<div class="ha">' + audioBtn
+      + '<button class="b0 sm" onclick="renameRec('+r.id+')">✎</button>'
+      + '<button class="bd sm" onclick="delRec('+r.id+')">✕</button></div>';
+    list.appendChild(div);
+  });
 };
 
 // ── Patch renderTopic to load saved note ──────────────────────────────────
