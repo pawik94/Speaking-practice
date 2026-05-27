@@ -1504,10 +1504,11 @@ async function openEd(id) {
 
       try {
         toast('Downloading audio from cloud…');
-        // Use Firebase SDK getBytes() — avoids CORS issues with direct fetch()
-        const MAX_SIZE = 30 * 1024 * 1024; // 30MB
-        const bytes = await fbSt.ref(storagePath).getBytes(MAX_SIZE);
-        audioAB = bytes.buffer;
+        // getDownloadURL + fetch (compat SDK doesn't have getBytes)
+        const downloadURL = await fbSt.ref(storagePath).getDownloadURL();
+        const resp = await fetch(downloadURL);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        audioAB = await resp.arrayBuffer();
 
         // Cache locally for future offline use
         if (!rec) {
@@ -2727,10 +2728,9 @@ async function fbSaveRec(rec) {
 async function fbGetAudioUrl(recId) {
   if (!fbUser || !fbSt) return null;
   try {
-    const path = `users/${fbUser.uid}/recordings/${recId}.webm`;
-    // Just check if it exists by getting metadata
-    await fbSt.ref(path).getMetadata();
-    return path; // return path, not URL — we use getBytes() now
+    const path = 'users/' + fbUser.uid + '/recordings/' + recId + '.webm';
+    const url = await fbSt.ref(path).getDownloadURL();
+    return url; // actual download URL
   } catch(e) { return null; }
 }
 
