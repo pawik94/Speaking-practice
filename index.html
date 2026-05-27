@@ -130,6 +130,15 @@ textarea.trb:focus{outline:none;border-color:var(--ac)}
   <p>Random English topics · Record yourself · Transcription & analysis</p>
 </div>
 <div class="cats" id="cat-wrap"></div>
+<!-- Groq key missing banner -->
+<div id="groq-key-banner" style="display:none;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.3);border-radius:10px;padding:12px 14px;margin-bottom:12px">
+  <div style="font-size:13px;font-weight:600;color:#f59e0b;margin-bottom:8px">⚠ Groq API key required for transcription & AI analysis</div>
+  <div style="display:flex;gap:8px">
+    <input id="groq-key-input" type="password" placeholder="gsk_..." style="flex:1;background:var(--bg);border:1px solid var(--b2);border-radius:6px;color:var(--tx);font-size:13px;padding:6px 10px">
+    <button class="bp sm" onclick="saveGroqKeyFromInput()">Save</button>
+  </div>
+  <div style="font-size:11px;color:var(--tx3);margin-top:6px">Get free key at console.groq.com → API Keys. Key is saved to Firestore — enter once, works on all devices.</div>
+</div>
 <!-- Stats bar -->
 <div id="stats-bar" style="background:var(--bg2);border:1px solid var(--b2);border-radius:12px;padding:12px 16px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">
   <div style="text-align:center">
@@ -451,7 +460,7 @@ textarea.trb:focus{outline:none;border-color:var(--ac)}
           <span style="color:var(--tx3)">Transkrypt z nagrania jest już wstępnie wypełniony poniżej (live recognition).</span>
         </div>
         <div id="tr-key-row" style="display:flex;gap:7px;margin-bottom:9px;flex-wrap:wrap;align-items:center">
-          <input id="tr-apikey" type="password" placeholder="Gemini API key (opcjonalnie — domyślny jest wbudowany)"
+          <input id="tr-apikey" type="password" placeholder="Groq API key (gsk_...)"
             style="flex:1;min-width:140px;background:var(--bg);border:1px solid var(--b2);border-radius:8px;color:var(--tx);font-size:12px;padding:5px 9px;font-family:inherit"
             oninput="trKeyChanged()">
           <button class="b0 sm" onclick="trSaveKey()">Save key</button>
@@ -1758,20 +1767,20 @@ document.addEventListener('focusout',e=>{if(e.target?.id==='tr-out')saveTr();});
 // ═══════════════════════ WHISPER TRANSCRIPTION ═══════════════════════
 // ═══════════════════════ TRANSCRIPT KEY MANAGEMENT ═══════════════════════
 function trInitKey() {
+  updateGroqKeyUI();
   const st = document.getElementById('tr-key-status');
-  if (st) st.textContent = '✓ Gemini AI gotowy';
+  if (st) { const k = getGroqKey(); st.textContent = k ? '✓ Groq Whisper ready' : '⚠ No API key'; st.style.color = k ? 'var(--gr)' : 'var(--am)'; }
 }
 function trKeyChanged() {}
 function trSaveKey() {
   const inp = document.getElementById('tr-apikey');
   const val = inp?.value?.trim();
-  if (val && val !== '••••••••') {
-    localStorage.setItem('gemini_key', val);
+  if (val && val.startsWith('gsk_')) {
+    saveGroqKey(val);
     inp.value = '••••••••';
-    const st = document.getElementById('tr-key-status');
-    if (st) st.textContent = '✓ Klucz zapisany';
-    toast('Klucz Gemini zapisany');
-  }
+    updateGroqKeyUI();
+    toast('Groq key saved ✓');
+  } else { toast('Key must start with gsk_'); }
 }
 
 async function transcribeAudio() {
@@ -1799,7 +1808,7 @@ async function transcribeAudio() {
 
     const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
       method: 'POST',
-      headers: {'Authorization': 'Bearer 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'},
+      headers: {'Authorization': 'Bearer ' + getGroqKey()},
       body: form
     });
 
@@ -2123,12 +2132,60 @@ function getGeminiUrl(model) {
 }
 // GEMINI_URL removed — using Groq for text
 
-const GROQ_KEY_TEXT = "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";
+// ── Groq API key management ──────────────────────────────────────────────────
+function getGroqKey() {
+  return localStorage.getItem('groq_key') || '';
+}
+
+function saveGroqKey(key) {
+  localStorage.setItem('groq_key', key);
+  if (fbUser) {
+    const ud = fbUserDoc();
+    if (ud) ud.collection('settings').doc('apiKeys').set({groq: key}, {merge: true})
+      .catch(e => console.warn('Groq key sync failed:', e));
+  }
+}
+
+function saveGroqKeyFromInput() {
+  const inp = document.getElementById('groq-key-input');
+  const val = inp ? inp.value.trim() : '';
+  if (!val.startsWith('gsk_')) { toast('Invalid key — must start with gsk_'); return; }
+  saveGroqKey(val);
+  if (inp) inp.value = '';
+  updateGroqKeyUI();
+  toast('Groq key saved ✓ — transcription & analysis ready');
+}
+
+async function loadGroqKeyFromFirestore() {
+  if (!fbUser) return;
+  try {
+    const ud = fbUserDoc();
+    const snap = await ud.collection('settings').doc('apiKeys').get();
+    if (snap.exists && snap.data().groq) {
+      localStorage.setItem('groq_key', snap.data().groq);
+      updateGroqKeyUI();
+    }
+  } catch(e) { console.warn('loadGroqKey error:', e); }
+}
+
+function updateGroqKeyUI() {
+  const hasKey = !!getGroqKey();
+  const banner = document.getElementById('groq-key-banner');
+  if (banner) banner.style.display = hasKey ? 'none' : '';
+  const st = document.getElementById('tr-key-status');
+  if (st) { st.textContent = hasKey ? '✓ Groq ready' : '⚠ No key'; st.style.color = hasKey ? 'var(--gr)' : 'var(--am)'; }
+  const gst = document.getElementById('groq-key-status');
+  if (gst) { gst.textContent = hasKey ? '✓ Active' : '⚠ Missing'; gst.style.color = hasKey ? 'var(--gr)' : 'var(--am)'; }
+}
+// ── End Groq key management ──────────────────────────────────────────────────
+
+
+
 async function fetchGemini(prompt) {
   // Using Groq Llama for all text generation (Gemini quota is 0 on this key)
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer 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'},
+    headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + getGroqKey()},
     body: JSON.stringify({
       model: 'llama-3.3-70b-versatile',
       messages: [{role: 'user', content: prompt}],
@@ -2523,7 +2580,7 @@ async function vocAutoTranscribe(rawAB, outEl) {
     form.append('response_format', 'text');
     var res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
       method: 'POST',
-      headers: {'Authorization': 'Bearer ' + GROQ_KEY_TEXT},
+      headers: {'Authorization': 'Bearer ' + getGroqKey()},
       body: form
     });
     if (res.ok) {
@@ -2913,6 +2970,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Load Firebase SDK dynamically — safe in all contexts
   statsLoad(); renderStats();
   bkmLoad();
+  updateGroqKeyUI();
   loadFirebase();
 });
 
