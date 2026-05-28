@@ -1364,7 +1364,14 @@ async function onRecStop() {
     const id = Date.now();
     const name = curTopic ? curTopic.q.substring(0,55) + '…' : 'Recording ' + new Date().toLocaleDateString('en-GB');
     // Store raw WebM bytes — much smaller than Float32 arrays
-    const rec = { id, name, date: id, dur: buf.duration, audioAB: ab, transcript: liveTranscript.trim(), topic: curTopic };
+    const rec = {
+      id, name, date: id, dur: buf.duration, audioAB: ab,
+      transcript: liveTranscript.trim(),
+      topic: curTopic,
+      // Save vocab shown in panel so analysis works from history
+      vocabWords: window._lastVWords || [],
+      idiomWords: window._lastVIdioms || []
+    };
     curRecId = id;
     curBufCache = buf; // keep decoded buffer in memory for immediate use
     if (db) await dbSave(rec);
@@ -1862,48 +1869,85 @@ function runAnalysis(){
   if (!transcript) { toast('Run transcription first — AI needs the transcript'); return; }
   const btn=document.getElementById('bana');
   if(btn){btn.innerHTML='<span class="spin"></span>Getting AI feedback…';btn.disabled=true;}
-  const topic = (edRec && edRec.topic) || (curTopic && curTopic.q) || null;
+  // Pass full topic object so AI knows vocab, tip, difficulty
+  // edRec.topic may be full topic object or just a string (older recordings)
+  let topicObj = curTopic || null;
+  let topicQ = null;
+  if (edRec && edRec.topic) {
+    if (typeof edRec.topic === 'object') {
+      topicObj = edRec.topic; // full object saved with recording
+      topicQ = edRec.topic.q;
+    } else {
+      topicQ = edRec.topic; // legacy: just a string
+    }
+  } else if (curTopic) {
+    topicQ = curTopic.q;
+  }
   const anOut = document.getElementById('an-out');
   if (anOut) anOut.innerHTML = '';
   const aiFbEl = document.getElementById('ai-feedback-out');
   if (aiFbEl) aiFbEl.innerHTML = '';
-  // Go straight to AI feedback — no waveform stats section
-  runAIFeedback(transcript, topic, {wpm:0, fillerCount:0, pauses:[], longPauses:0})
+  runAIFeedback(transcript, topicQ, {}, topicObj)
     .finally(function(){ if(btn){btn.textContent='▶ Analyse recording';btn.disabled=false;} });
 }
 
-async function runAIFeedback(transcript, topic, waveStats) {
-  // Find or create AI feedback container (appended after waveform analysis)
+async function runAIFeedback(transcript, topicQ, waveStats, topicObj) {
   let container = document.getElementById('ai-feedback-out');
   if (!container) {
-    const anOut = document.getElementById('an-out') || document.getElementById('ai-feedback-out');
-    if (!anOut) return;
+    const parent = document.getElementById('an-out')?.parentElement
+      || document.querySelector('#s-ed .wrap');
+    if (!parent) return;
     container = document.createElement('div');
     container.id = 'ai-feedback-out';
-    anOut.parentElement.appendChild(container);
+    parent.appendChild(container);
   }
 
-  container.innerHTML = `<div style="margin-top:14px;padding:12px 14px;background:var(--bg2);border:1px solid var(--b2);border-radius:10px">
-    <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--tx3);margin-bottom:8px">🤖 AI Coach Feedback</div>
-    <div style="font-size:13px;color:var(--tx3);font-style:italic"><span class="spin" style="margin-right:6px"></span>Analysing your speech…</div>
-  </div>`;
+  container.innerHTML = '<div style="margin-top:14px;padding:12px 14px;background:var(--bg2);border:1px solid var(--b2);border-radius:10px">'
+    + '<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--tx3);margin-bottom:8px">🤖 AI Coach Feedback</div>'
+    + '<div style="font-size:13px;color:var(--tx3);font-style:italic"><span class="spin" style="margin-right:6px"></span>Analysing your speech…</div>'
+    + '</div>';
 
-  const topicLine = topic ? `Topic/Question: "${topic}"` : 'No specific topic — general speaking practice.';
-  const statsLine = waveStats.wpm > 0
-    ? `Speaking pace: ${waveStats.wpm} wpm. Filler words: ${waveStats.fillerCount}. Pauses ≥0.5s: ${waveStats.pauses.length} (${waveStats.longPauses} long ≥2s).`
-    : `Filler words: ${waveStats.fillerCount}. Pauses ≥0.5s: ${waveStats.pauses.length}.`;
+  // Build rich topic context — resolve from saved topic + panel vocab
+  const q = topicQ || (topicObj && topicObj.q) || null;
 
-  const prompt = `You are a strict English speaking coach. Analyse this transcript in max 120 words total. Be blunt, not encouraging.
+  // If topicObj is just a string from legacy recording, find full topic in TOPICS
+  let fullTopic = topicObj;
+  if (q && (!fullTopic || !fullTopic.t)) {
+    fullTopic = TOPICS.find(function(t){ return t.q === q; }) || fullTopic;
+  }
 
-${topicLine}
+  let topicContext = q ? 'TOPIC QUESTION: "' + q + '"' : 'No specific topic.';
+  if (fullTopic && fullTopic.t) topicContext += '\nSPEAKING TIP: ' + fullTopic.t;
+  if (fullTopic && fullTopic.d) topicContext += '\nLEVEL: ' + fullTopic.d;
 
-TRANSCRIPT: "${transcript}"
+  // Target vocab: prefer saved panel words, fall back to topic definition words
+  var vocabForPrompt = [];
+  if (edRec && edRec.vocabWords && edRec.vocabWords.length) {
+    vocabForPrompt = edRec.vocabWords.map(function(w){ return {w: w.e, tp: 'word', df: w.en || w.p}; });
+  } else if (window._lastVWords && window._lastVWords.length) {
+    vocabForPrompt = window._lastVWords.map(function(w){ return {w: w.e, tp: 'word', df: w.en || w.p}; });
+  } else if (fullTopic && fullTopic.w && fullTopic.w.length) {
+    vocabForPrompt = fullTopic.w;
+  }
 
-Reply with EXACTLY this structure (no extra text):
-TOPIC: [one sentence — did they answer the question? yes/partially/no + why]
-VOCAB: [best word they used] ✓ | should have said [simpler word they used] → [better word]
-GRAMMAR: [quote error] → [correction] (skip if none)
-VERDICT: [1 sentence — biggest weakness to fix]`;
+  if (vocabForPrompt.length) {
+    topicContext += '\nTARGET VOCABULARY (shown to speaker before recording):';
+    vocabForPrompt.forEach(function(wObj) {
+      topicContext += '\n  • ' + wObj.w + (wObj.tp ? ' (' + wObj.tp + ')' : '') + ': ' + (wObj.df || wObj.p || '');
+    });
+  }
+
+  const prompt = 'You are a strict but fair English speaking coach evaluating a B2-C1 learner. '
+    + 'Read the topic and transcript carefully before responding.\n\n'
+    + topicContext + '\n\n'
+    + 'TRANSCRIPT:\n"' + transcript + '"\n\n'
+    + 'Give structured feedback with these 4 sections. Be specific — quote from the transcript:\n\n'
+    + 'TOPIC RELEVANCE: Did they actually answer the question? Were their arguments logical and on-point? '
+    + 'Quote a specific part that shows they did or did not stay on topic.\n\n'
+    + 'VOCABULARY: Did they use any of the TARGET VOCABULARY words listed above? '
+    + 'Name which ones they used (or say none). Then name 1-2 simpler words they said that could be replaced — give the better alternative.\n\n'
+    + 'GRAMMAR: Quote up to 2 actual errors from the transcript with corrections. If none, say "No errors detected."\n\n'
+    + 'VERDICT: One sentence — the single most important thing to improve next time.';
 
   try {
     const text = await fetchGemini(prompt);
@@ -2855,7 +2899,7 @@ const _origDbSave = dbSave;
 dbSave = async function(rec) {
   const isNew = !rec.id || !(await dbGet(rec.id));
   await _origDbSave(rec);
-  if (isNew) { statsTrackRecording(); if (rec.topic) topicCountIncrement(rec.topic); }
+  if (isNew) { statsTrackRecording(); const tq = rec.topic && typeof rec.topic === 'object' ? rec.topic.q : rec.topic; if (tq) topicCountIncrement(tq); }
   if (fbUser) {
     // AWAIT so user sees the result — fbSaveRec shows toast on failure
     await fbSaveRec(rec);
