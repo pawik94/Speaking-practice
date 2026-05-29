@@ -344,27 +344,36 @@ textarea.trb:focus{outline:none;border-color:var(--ac)}
   <button class="b0 sm" onclick="showVocabLesson()">&#x1F3B2; New set</button>
 </div>
 <div class="wrap">
-  <div id="voc-cards" style="margin-bottom:14px"></div>
 
-  <!-- Textarea always visible -->
-  <div style="margin-bottom:12px">
-    <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--tx3);margin-bottom:6px">Your story / notes</div>
-    <textarea id="voc-text" rows="5" placeholder="Napisz tutaj histoire uzywajac powyzszych slow. Mozesz tez robic notatki. Tekst nie znika przy przelaczaniu." style="width:100%;background:var(--bg);border:1px solid var(--b2);border-radius:10px;color:var(--tx);font-size:14px;padding:10px 12px;font-family:inherit;resize:vertical;box-sizing:border-box"></textarea>
+  <!-- 3 columns side by side -->
+  <div id="voc-3col" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:14px">
+    <div>
+      <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#a5b4fc;margin-bottom:6px;text-align:center">📚 Words</div>
+      <div id="voc-cards-words"></div>
+    </div>
+    <div>
+      <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#86efac;margin-bottom:6px;text-align:center">💬 Idioms</div>
+      <div id="voc-cards-idioms"></div>
+    </div>
+    <div>
+      <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#fca5a5;margin-bottom:6px;text-align:center">🎭 Character</div>
+      <div id="voc-cards-adjs"></div>
+    </div>
   </div>
 
-  <!-- Tabs: just toggle recording panel -->
-  <!-- Category selector -->
-  <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--tx3);margin-bottom:6px">Kategoria</div>
-  <div style="display:flex;gap:0;border-radius:10px;overflow:hidden;border:1px solid var(--b2);margin-bottom:12px">
-    <button id="vcatbtn-words" class="vtab on" onclick="switchVocabCategory('words')">&#x1F4DA; Words</button>
-    <button id="vcatbtn-idioms" class="vtab" onclick="switchVocabCategory('idioms')">&#x1F4AC; Idioms</button>
-    <button id="vcatbtn-adjectives" class="vtab" onclick="switchVocabCategory('adjectives')">&#x1F3AD; Character</button>
+  <!-- Story task prompt -->
+  <div style="background:rgba(124,111,255,.08);border:1px solid rgba(124,111,255,.2);border-radius:10px;padding:10px 14px;margin-bottom:10px;font-size:12.5px;color:var(--tx2)">
+    <strong style="color:#a5b4fc">Task:</strong> Make up a short story (spoken or written) using all 9 items above — at least one word, one idiom, and one character trait.
   </div>
 
+  <!-- Write / Record tabs -->
   <div style="display:flex;gap:0;border-radius:10px;overflow:hidden;border:1px solid var(--b2);margin-bottom:12px">
-    <button id="vtab-write" class="vtab on" onclick="switchVTab('write')">&#x270D; Write mode</button>
+    <button id="vtab-write" class="vtab on" onclick="switchVTab('write')">&#x270D; Write</button>
     <button id="vtab-rec" class="vtab" onclick="switchVTab('rec')">&#x1F399; Record</button>
   </div>
+
+  <!-- Hidden legacy container (kept so renderVocCards doesn't crash) -->
+  <div id="voc-cards" style="display:none"></div>
 
   <!-- Recording panel (hidden in write mode) -->
   <div id="vtab-body-rec" style="display:none;margin-bottom:12px">
@@ -2146,7 +2155,7 @@ function renderAnalysis(d,el){
 
 
 // =============== VOCAB LESSON ===============
-var vocItems = [];
+var vocItems = [], vocItemsWords = [], vocItemsIdioms = [], vocItemsAdjs = [];
 var vocCategory = "words";
 var vocBuf = null, vocRecording = false, vocStream = null;
 var vocMrec = null, vocChunks = [], vocRecAnim = null;
@@ -2382,38 +2391,98 @@ function srsStatsLine(pool) {
 }
 // ════════════════════ END SPACED REPETITION ════════════════════
 
+function pairToItem(pair) {
+  var builtIn = pair[2] ? [pair[2]] : [];
+  var enDef = pair[5] || pair[3] || '';
+  var colls  = pair[3] || '';
+  var pron   = pair[4] || '';
+  if (!pair[4] && pair[3] && !pair[3].includes(' · ')) {
+    enDef = pair[3]; colls = ''; pron = '';
+  }
+  return {e: pair[0], p: pair[1], builtIn: builtIn, exs: null, colls: colls, pron: pron, en: enDef};
+}
+
 function showVocabLesson() {
   srsLoad();
-  srsSessionMarked = new Set(); // reset for new session
-  vocShowEN = {}; // reset lang toggle
-  var pool = vocCategory === 'idioms' ? ALL_IDIOMS : vocCategory === 'adjectives' ? ALL_ADJECTIVES : ALL_WORDS;
-  // SRS: prioritise due reviews, then new words
-  var ordered = srsGetDue(pool).slice(0, 6);
-  vocItems = ordered.map(function(pair) {
-    var builtIn = pair[2] ? [pair[2]] : [];
-    var enDef = pair[5] || pair[3] || ''; // words[5], idioms/adjs have en at [3]
-    var colls  = pair[3] || '';
-    var pron   = pair[4] || '';
-    // For idioms/adjs: fields are [phrase, pl, example, en_def]
-    if (!pair[4] && pair[3] && !pair[3].includes(' · ')) {
-      enDef = pair[3]; colls = ''; pron = '';
-    }
-    return {e: pair[0], p: pair[1], builtIn: builtIn, exs: null,
-            colls: colls, pron: pron, en: enDef};
-  });
-  // Load SRS from Firestore in background
+  srsSessionMarked = new Set();
+  vocShowEN = {};
+  // Load 3 items from each category
+  vocItemsWords = srsGetDue(ALL_WORDS).slice(0, 3).map(pairToItem);
+  vocItemsIdioms = srsGetDue(ALL_IDIOMS).slice(0, 3).map(pairToItem);
+  vocItemsAdjs   = srsGetDue(ALL_ADJECTIVES).slice(0, 3).map(pairToItem);
+  // Keep vocItems as combined for backward compat (analysis etc)
+  vocItems = vocItemsWords.concat(vocItemsIdioms).concat(vocItemsAdjs);
   if (fbUser) srsFirestoreLoad();
   vocBuf = null; vocTranscript = '';
   var vt = document.getElementById('voc-text'); if (vt) vt.value = '';
   var fb = document.getElementById('voc-feedback'); if (fb) fb.innerHTML = '';
   var st = document.getElementById('voc-analyse-status'); if (st) st.textContent = '';
   document.getElementById('voc-rec-done').style.display = 'none';
+  renderVocCol('voc-cards-words', vocItemsWords);
+  renderVocCol('voc-cards-idioms', vocItemsIdioms);
+  renderVocCol('voc-cards-adjs', vocItemsAdjs);
   document.getElementById('voc-rec-live').style.display = '';
   switchVTab('write');
   renderVocCards(false);
   go('vocab');
   loadVocExamples();
 }
+
+function renderVocCol(elId, items) {
+  var wrap = document.getElementById(elId); if (!wrap) return;
+  wrap.innerHTML = '';
+  items.forEach(function(item) {
+    var srsInfo = srsLevelLabel(item.e);
+    var safeW = item.e.replace(/'/g,"\\'").replace(/"/g,'&quot;');
+    var showEn = vocShowEN[item.e] !== false;
+    var alreadyMarked = srsSessionMarked.has(item.e);
+    var wid = 'srs-' + item.e.replace(/[^a-z0-9]/gi,'_');
+
+    var card = document.createElement('div');
+    card.style.cssText = 'background:var(--bg2);border:1px solid var(--b2);border-radius:8px;padding:8px 10px;margin-bottom:7px;font-size:12px';
+
+    // Header: word + level dots + EN/PL toggle
+    var header = '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">'
+      + '<span style="font-size:13px;font-weight:700;color:#dde0ff;word-break:break-word">' + esc(item.e) + '</span>'
+      + '<div style="display:flex;align-items:center;gap:3px;flex-shrink:0;margin-left:4px">'
+      + '<button class="b0" style="font-size:8px;padding:1px 4px;border-radius:3px" onclick="vocToggleLang(\''+safeW+'\')">' + (showEn?'PL':'EN') + '</button>'
+      + '<span style="font-size:10px">' + srsInfo.dots + '</span>'
+      + '</div></div>';
+
+    // Definition
+    var def = '<div id="voc-def-'+safeW+'" style="font-size:11.5px;color:var(--tx2);margin-bottom:4px">' + esc(showEn ? (item.en||item.p) : item.p) + '</div>';
+
+    // Pronunciation if available
+    var pron = item.pron ? '<div style="font-size:10.5px;color:#a78bfa;margin-bottom:4px">🔊 ' + esc(item.pron) + '</div>' : '';
+
+    // Collocations
+    var colls = '';
+    if (item.colls) {
+      colls = '<div style="margin-bottom:5px">';
+      item.colls.split(' · ').forEach(function(c) {
+        colls += '<span style="display:inline-block;font-size:10px;background:rgba(99,102,241,.15);color:#a5b4fc;border-radius:3px;padding:1px 5px;margin:1px 2px 1px 0">' + esc(c) + '</span>';
+      });
+      colls += '</div>';
+    }
+
+    // Example sentence
+    var ex = (item.builtIn && item.builtIn[0])
+      ? '<div style="font-size:11px;color:var(--tx3);border-left:2px solid var(--ac);padding-left:6px;margin-bottom:6px;font-style:italic">' + esc(item.builtIn[0]) + '</div>'
+      : '';
+
+    // SRS buttons
+    var btns = alreadyMarked
+      ? '<div style="font-size:10px;color:' + srsInfo.color + ';opacity:.5">✓ ' + srsInfo.label + '</div>'
+      : '<div id="'+wid+'" style="display:flex;gap:4px">'
+        + '<button class="b0" style="flex:1;font-size:10px;padding:3px;background:rgba(255,85,85,.12);color:var(--rd)" onclick="srsMark(\''+safeW+'\',false,\''+wid+'\')">✕</button>'
+        + '<button class="bp" style="flex:1;font-size:10px;padding:3px" onclick="srsMark(\''+safeW+'\',true,\''+wid+'\')">✓</button>'
+        + '</div>';
+
+    card.innerHTML = header + def + pron + colls + ex + btns;
+    wrap.appendChild(card);
+  });
+}
+
 
 function renderVocCards(loaded) {
   var wrap = document.getElementById('voc-cards'); if (!wrap) return;
