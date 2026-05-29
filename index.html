@@ -375,6 +375,11 @@ textarea.trb:focus{outline:none;border-color:var(--ac)}
   <!-- Hidden legacy container (kept so renderVocCards doesn't crash) -->
   <div id="voc-cards" style="display:none"></div>
 
+  <!-- Story textarea — always visible -->
+  <div id="vtab-body-write" style="margin-bottom:10px">
+    <textarea id="voc-text" rows="5" placeholder="Write your story here using all 9 items above. The more naturally you use them the better. Text is preserved when switching modes." style="width:100%;background:var(--bg);border:1px solid var(--b2);border-radius:10px;color:var(--tx);font-size:13.5px;padding:10px 12px;font-family:inherit;resize:vertical;box-sizing:border-box"></textarea>
+  </div>
+
   <!-- Recording panel (hidden in write mode) -->
   <div id="vtab-body-rec" style="display:none;margin-bottom:12px">
     <div class="note" style="margin-bottom:8px">Nagraj wypowiedz. Transkrypt zostanie dopisany do pola powyzej.</div>
@@ -2596,6 +2601,7 @@ function switchVocabCategory(cat) {
 
 function switchVTab(tab) {
   var btnW = document.getElementById('vtab-write'); if (btnW) btnW.classList.toggle('on', tab === 'write');
+  // Write area always visible — only toggle recording panel
   var btnR = document.getElementById('vtab-rec');   if (btnR) btnR.classList.toggle('on', tab === 'rec');
   var recPanel = document.getElementById('vtab-body-rec');
   if (recPanel) recPanel.style.display = tab === 'rec' ? '' : 'none';
